@@ -585,21 +585,72 @@
       const data = await res.json();
       if (data.gemini_configured) {
         geminiStatusInd.className = 'badge badge-success';
-        geminiStatusInd.textContent = data.gemini_model || 'gemini-3.8-flash';
-        geminiStatusHint.textContent = 'Free Tier Active';
+        geminiStatusInd.textContent = data.gemini_model || 'gemini-3.5-flash';
+        geminiStatusHint.textContent = `Model: ${data.gemini_model || 'gemini-3.5-flash'} (Free Tier)`;
       } else {
         geminiStatusInd.className = 'badge badge-warning';
         geminiStatusInd.textContent = 'API Key Missing';
         geminiStatusHint.textContent = 'Add GEMINI_API_KEY to server/.env';
       }
 
+      const aiModelBadge = document.getElementById('ai-model-badge');
+      if (aiModelBadge && data.diagnostics) {
+        const diag = data.diagnostics;
+        aiModelBadge.textContent = diag.status === 'online' ? `Gemini (${diag.active_model})` : 'AI: Offline';
+        aiModelBadge.style.color = diag.status === 'online' ? '#00ffcc' : '#ff4d4f';
+        aiModelBadge.style.borderColor = diag.status === 'online' ? '#00ffcc' : '#ff4d4f';
+      }
+
       if (data.active_app) {
-        activeAppName.textContent = data.active_app;
+        activeAppName.textContent = data.active_app + (data.tab_title ? ` — ${data.tab_title}` : '');
+      }
+
+      // Update Multitasking Active Container
+      const multitaskContainer = document.getElementById('multitask-container');
+      const taskGoalText = document.getElementById('task-goal-text');
+      const taskStepsContainer = document.getElementById('task-steps-container');
+      if (data.active_task && data.active_task.active) {
+        if (multitaskContainer) multitaskContainer.style.display = 'block';
+        if (taskGoalText) taskGoalText.textContent = data.active_task.instruction;
+        if (taskStepsContainer && data.active_task.steps) {
+          taskStepsContainer.innerHTML = data.active_task.steps.map(s => `
+            <div style="display:flex; justify-content:space-between; padding:6px 10px; background:rgba(255,255,255,0.05); border-radius:4px; font-size:12px;">
+              <span>Step ${s.step_id}: ${s.description}</span>
+              <span style="font-weight:bold; color:${s.status === 'completed' ? '#00ffcc' : (s.status === 'in_progress' ? '#ffd700' : '#888')}">${s.status.toUpperCase()}</span>
+            </div>
+          `).join('');
+        }
+      } else if (multitaskContainer && (!data.active_task || !data.active_task.active)) {
+        multitaskContainer.style.display = 'none';
       }
     } catch (e) {
       console.warn('Status check failed:', e);
     }
   }
+
+  // Floating Popup button
+  const btnOpenPopup = document.getElementById('btn-open-popup');
+  if (btnOpenPopup) {
+    btnOpenPopup.addEventListener('click', () => {
+      window.open('/popup', 'sahayak_popup', 'width=390,height=440,menubar=no,toolbar=no,location=no');
+    });
+  }
+
+  // Cancel Task button
+  const btnCancelTask = document.getElementById('btn-cancel-task');
+  if (btnCancelTask) {
+    btnCancelTask.addEventListener('click', async () => {
+      try {
+        await fetch('/api/tasks/cancel', { method: 'POST' });
+        announce('Active task cancelled.');
+        const mc = document.getElementById('multitask-container');
+        if (mc) mc.style.display = 'none';
+      } catch (e) {}
+    });
+  }
+
+  // Poll system health every 3 seconds
+  setInterval(checkSystemHealth, 3000);
 
   // Initial Load
   applyTheme(state.contrastMode);

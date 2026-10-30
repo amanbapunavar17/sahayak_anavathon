@@ -16,10 +16,19 @@ import sys
 import time
 import typing
 import urllib.parse
+from pathlib import Path
 from pydantic import BaseModel
 
-from intent_classifier import WEBSITE_CATALOG, resolve_website_key
-from screen_engine import get_active_app_context, perform_local_ocr_on_screen
+_SERVER_DIR = Path(__file__).resolve().parent
+if str(_SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(_SERVER_DIR))
+
+try:
+    from intent_classifier import WEBSITE_CATALOG, resolve_website_key
+    from screen_engine import get_active_app_context, perform_local_ocr_on_screen
+except ImportError:
+    from server.intent_classifier import WEBSITE_CATALOG, resolve_website_key
+    from server.screen_engine import get_active_app_context, perform_local_ocr_on_screen
 
 logger = logging.getLogger("sahayak-browser")
 
@@ -81,9 +90,8 @@ class BrowserEngine:
         logger.info(f"Opening URL '{url}' with browser '{browser}'")
 
         try:
-            if browser and browser in ["Safari", "Google Chrome", "Arc"]:
-                # Try launching or focusing front window via AppleScript
-                if browser == "Safari":
+            if browser and any(b in browser for b in ["Safari", "Google Chrome", "Chromium", "Arc"]):
+                if "Safari" in browser:
                     script = f'''
                     tell application "Safari"
                         activate
@@ -92,6 +100,32 @@ class BrowserEngine:
                         else
                             set URL of current tab of front window to "{url}"
                         end if
+                    end tell
+                    '''
+                    res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3)
+                    if res.returncode == 0:
+                        return True
+                elif "Google Chrome" in browser or "Chromium" in browser:
+                    script = f'''
+                    tell application "Google Chrome"
+                        activate
+                        if (count of windows) = 0 then
+                            make new window
+                        end if
+                        set URL of active tab of front window to "{url}"
+                    end tell
+                    '''
+                    res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3)
+                    if res.returncode == 0:
+                        return True
+                elif "Arc" in browser:
+                    script = f'''
+                    tell application "Arc"
+                        activate
+                        if (count of windows) = 0 then
+                            make new window
+                        end if
+                        set URL of active tab of front window to "{url}"
                     end tell
                     '''
                     res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3)

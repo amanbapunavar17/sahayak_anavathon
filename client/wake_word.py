@@ -394,9 +394,52 @@ if __name__ == "__main__":
     overlay = ActivityOverlay()
     stop_event = threading.Event()
 
+    # Import and start Global Wake Word Service & Floating Popup
+    try:
+        from client.wake_word_service import wake_service, play_chime
+        from client.floating_popup import floating_popup
+
+        def _on_wake():
+            logger.info("HELLO SAHAY wake word activated!")
+            overlay.set_active(True)
+            floating_popup.show()
+            floating_popup.update_state(mic="Listening...")
+
+        def _on_command(cmd_text: str):
+            logger.info(f"Executing voice command: '{cmd_text}'")
+            floating_popup.update_state(query=cmd_text, mic="Processing...")
+            try:
+                import httpx
+                api_url = os.getenv("SAHAYAK_SERVER_URL", "http://localhost:8080/api/chat")
+                res = httpx.post(api_url, json={"message": cmd_text}, timeout=30.0)
+                if res.status_code == 200:
+                    d = res.json()
+                    floating_popup.update_state(response=d.get("spoken_response", "Action completed."), mic="Idle")
+                else:
+                    floating_popup.update_state(response=f"Server returned {res.status_code}", mic="Idle")
+            except Exception as e:
+                logger.error(f"Command execution error: {e}")
+                floating_popup.update_state(response=str(e), mic="Idle")
+            finally:
+                time.sleep(2.0)
+                overlay.set_active(False)
+
+        wake_service.on_wake = _on_wake
+        wake_service.on_command = _on_command
+        wake_service.start()
+        floating_popup.start()
+        logger.info("Global Wake Word Service ('HELLO SAHAY') and Floating Assistant active.")
+    except Exception as exc:
+        logger.warning(f"Could not initialize background wake-word/floating popup: {exc}")
+
     def _sigint(sig, frame):
         logger.info("Shutdown requested.")
         stop_event.set()
+        try:
+            wake_service.stop()
+            floating_popup.hide()
+        except Exception:
+            pass
         overlay.shutdown()
 
     signal.signal(signal.SIGINT, _sigint)

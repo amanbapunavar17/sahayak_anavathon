@@ -29,6 +29,8 @@ class IntentType(str, Enum):
     DESCRIBE_SCREEN = "describe_screen"
     SENSITIVE_ACTION = "sensitive_action"
     COMPUTER_CONTROL = "computer_control"
+    CONVERSATIONAL_AI = "conversational_ai"
+    MULTISTEP_TASK = "multistep_task"
 
 
 class IntentResult(BaseModel):
@@ -184,6 +186,46 @@ def classify_intent(text: str) -> IntentResult:
             query=raw,
             explanation="Request to describe or read visible screen content.",
         )
+
+    # 3. Multistep Task Workflows (Sequential Multi-action)
+    # Examples:
+    #   "Open YouTube, search for Python tutorials, find a beginner tutorial, summarize it and save to Notes."
+    #   "Open Safari, then open Notes and write down my next three tasks."
+    #   "Find my project PDF, read it and tell me its main points."
+    #   "Open Google, search for AI developments, collect the main points and explain them."
+    is_open_browser_search = bool(re.match(r"^open\s+(?:the\s+)?browser\s+and\s+search\s+", lower))
+    has_seq_conjunction = bool(re.search(r"\b(?:then|and\s+then|after\s+that)\b", lower))
+    has_notes_chain = ("notes" in lower and any(w in lower for w in ["write", "save", "tasks", "create"])) and any(w in lower for w in ["open", "search", "find", "summarize", "read"])
+    has_summarize_chain = any(w in lower for w in ["summarize", "main points", "collect the main"]) and any(w in lower for w in ["open", "search", "find", "pdf", "read", "inspect", "google", "youtube"])
+    has_read_and_tell = bool(re.search(r"\bread\s+(?:it|this|the\s+pdf|my\s+pdf)\s+and\s+(?:tell|summarize|explain)\b", lower))
+
+    if not is_open_browser_search and (has_seq_conjunction or has_notes_chain or has_summarize_chain or has_read_and_tell):
+        return IntentResult(
+            intent=IntentType.MULTISTEP_TASK,
+            query=raw,
+            explanation=f"Multi-step task workflow: '{raw}'.",
+        )
+
+    # 4. Conversational AI & General Knowledge
+    # Questions, explanations, learning plans, coding advice, error diagnostics
+    conversational_patterns = [
+        r"^(?:hello\s+sahayak|hi\s+sahayak|hello\s+sahay|hey\s+sahay|sahayak|sahay)[,\s]*$",
+        r"\b(?:explain|what\s+is|what\s+are|what's|difference\s+between|how\s+does|how\s+do\s+i|tell\s+me\s+about|why\s+is|who\s+is)\b",
+        r"\b(?:create|generate|write|make)\s+(?:a|an|me\s+a)?\s+.*(?:plan|guide|routine|schedule|roadmap|tutorial|essay|code|program|script|summary)\b",
+        r"\b(?:learning\s+plan|study\s+plan)\b",
+        r"\b(?:organize\s+my\s+work|plan\s+my\s+day|help\s+me\s+(?:learn|understand|write|organize))\b",
+        r"\b(?:don't\s+understand\s+this\s+error|explain\s+(?:this\s+)?error|what\s+does\s+this\s+mean|fix\s+this\s+error)\b",
+    ]
+    is_conversational = any(re.search(pat, lower) for pat in conversational_patterns)
+    # Check if not looking for a local file
+    if is_conversational and not any(w in lower for w in ["file named", "search my mac", "on my mac", "on my computer"]):
+        # Also ensure it's not a direct app opening like "open calculator"
+        if not re.match(r"^(?:open|launch)\s+[a-zA-Z0-9\s]+$", lower):
+            return IntentResult(
+                intent=IntentType.CONVERSATIONAL_AI,
+                query=raw,
+                explanation=f"Conversational AI inquiry: '{raw}'.",
+            )
 
     # 3. System Search (Mac Spotlight / File search)
     # Check if explicitly targeting local Mac files/folders/Spotlight

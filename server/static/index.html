@@ -47,10 +47,16 @@
           <span class="btn-icon" aria-hidden="true">A-</span>
           <span class="btn-text">Smaller</span>
         </button>
+        <button id="btn-open-popup" class="btn btn-outline" aria-label="Open floating assistant popup" title="Open Floating Assistant (Option+Space)">
+          <span class="btn-icon" aria-hidden="true">🪟</span>
+          <span class="btn-text">Floating Assistant</span>
+        </button>
         <div class="status-badge" id="system-status-badge" role="status" aria-label="System status">
           <span class="status-dot status-ready" id="status-dot"></span>
           <span id="status-text">Ready</span>
         </div>
+        <span class="badge" id="ai-model-badge" style="background: rgba(0,255,204,0.15); color: #00ffcc; padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; border: 1px solid #00ffcc;">Gemini AI</span>
+        <span class="badge" id="wake-word-badge" style="background: rgba(255,215,0,0.15); color: #ffd700; padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; border: 1px solid #ffd700;" title="Global Wake Word">🎙️ HELLO SAHAY</span>
       </div>
     </div>
   </header>
@@ -93,12 +99,30 @@
 
       <!-- Quick Command Buttons for Low-Vision Navigation -->
       <div class="quick-commands" role="group" aria-label="Quick voice command shortcuts">
-        <span class="quick-commands-label">Suggested Voice Commands:</span>
+        <span class="quick-commands-label">Suggested Commands:</span>
+        <button class="btn btn-chip" data-cmd="Explain artificial intelligence in simple language.">"Explain AI"</button>
+        <button class="btn btn-chip" data-cmd="What is the difference between RAM and storage?">"RAM vs Storage"</button>
+        <button class="btn btn-chip" data-cmd="Open YouTube and search for Python tutorials.">"Search YouTube"</button>
+        <button class="btn btn-chip" data-cmd="Open Safari, then open Notes and write down my next three tasks.">"Safari then Notes"</button>
         <button class="btn btn-chip" data-cmd="What is on my screen?">"What is on my screen?"</button>
         <button class="btn btn-chip" data-cmd="Read the text displayed here.">"Read this text"</button>
-        <button class="btn btn-chip" data-cmd="Open the browser.">"Open browser"</button>
-        <button class="btn btn-chip" data-cmd="Scroll down.">"Scroll down"</button>
-        <button class="btn btn-chip" data-cmd="Explain this window.">"Explain this window"</button>
+        <button class="btn btn-chip" data-cmd="Find my project PDF, read it and tell me its main points.">"Summarize PDF"</button>
+      </div>
+    </section>
+
+    <!-- Multitasking Active Workflow Panel -->
+    <section class="card panel-multitask" id="multitask-container" style="display: none; margin-bottom: 20px; border-left: 4px solid #ffd700;" aria-labelledby="multitask-title">
+      <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <h2 id="multitask-title" class="panel-heading" style="color: #ffd700; font-size: 16px;">⚡ Multi-Step Task in Progress</h2>
+        <button id="btn-cancel-task" class="btn btn-sm btn-outline" style="color: #ff4d4f; border-color: #ff4d4f;" aria-label="Cancel current running task">Cancel Task</button>
+      </div>
+      <div class="multitask-body">
+        <div style="margin-bottom: 10px; font-size: 14px;">
+          <strong>Goal:</strong> <span id="task-goal-text">Executing workflow...</span>
+        </div>
+        <div id="task-steps-container" role="list" style="display: flex; flex-direction: column; gap: 8px;">
+          <!-- Dynamically populated with step items -->
+        </div>
       </div>
     </section>
 

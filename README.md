@@ -11,8 +11,11 @@ SAHAYAK enables users to interact with their computers independently through nat
 ## 1. Project Objectives
 
 - **Independence:** Enable visually impaired users to use macOS computers without requiring visual assistance.
-- **Voice-First Experience:** Full voice interaction pipeline (Voice Input → Local Speech-to-Text → Semantic Reasoning → Action Execution → Spoken Spoken Feedback).
-- **Free-First Engineering:** 100% free of paid APIs and subscriptions. Employs the official Google Gemini 3.8 Flash free tier and on-device macOS Neural Engine Vision OCR and speech synthesis.
+- **Voice-First Experience:** Full voice interaction pipeline (Global Wake Word "HELLO SAHAY" → Voice Input → Local STT → Multi-model Gemini Reasoning → Action Execution → Spoken Feedback).
+- **Free-First Engineering:** 100% free of paid APIs and subscriptions. Employs Google Gemini Flash free tier with automatic multi-model failover (`gemini-3.8-flash` → `gemini-3.5-flash` → `gemini-3.5-flash-lite`), on-device macOS Neural Vision OCR, and native speech synthesis.
+- **Floating Overlay Companion:** Always-on-top accessible floating popup accessible anywhere across macOS with global hotkey <kbd>Option+Space</kbd>.
+- **Multitasking & Sequential Actions:** Decomposes complex multi-step instructions into verified sequential steps (e.g., search, summarize, and save directly to Apple Notes).
+- **Active App Awareness & Tab Reuse:** Automatically detects frontmost applications and browser tabs (YouTube, Google, Safari, Chrome), reusing existing tabs rather than spawning duplicate windows.
 - **Safety by Design:** Irreversible actions (file deletion, checkout, sending emails) require explicit user confirmation before execution.
 - **Resilient Fallback:** Seamlessly operates in Local Offline Assistive Mode if the internet or external AI services become temporarily unavailable.
 
@@ -199,41 +202,52 @@ venv/bin/python client/wake_word.py
 
 ## 10. Voice Commands & Usage
 
-Click the giant **Start Listening** button or press <kbd>Space</kbd> anywhere on the dashboard to speak:
+You can trigger SAHAYAK anytime:
+- **Global Wake Word:** Say **"HELLO SAHAY"** (or **"HELLO SAHAYAK"**) from anywhere across macOS.
+- **Global Keyboard Shortcut:** Press <kbd>Option + Space</kbd> to toggle the Floating Assistant companion popup.
+- **Web Dashboard:** Click the tactile **Start Listening** button or press <kbd>Space</kbd>.
 
-- **Screen Understanding:**
+### Example Command Categories:
+- **Conversational AI & General Knowledge:**
+  - *"Explain artificial intelligence simply."*
+  - *"What is the difference between RAM and storage?"*
+  - *"I am learning Python. Create a 30-day learning plan."*
+  - *"I don't understand this error on my screen. Can you explain it?"*
+- **Multitasking & Sequential Workflows:**
+  - *"Open Safari, then open Notes and write down my next three tasks."*
+  - *"Open YouTube, search for Python tutorials, summarize and save to Notes."*
+  - *"Find my project PDF, read it and tell me its main points."*
+- **Website & Browser Search (Never Spotlight):**
+  - *"Open YouTube and search for Python tutorials."*
+  - *"Go to YouTube and find music."*
+  - *"Open Google and search for latest AI news."*
+  - *"Search the web for best Python courses."*
+- **macOS System & File Search (Spotlight):**
+  - *"Find the file named project.pdf on my Mac."*
+- **Screen Understanding & Accessibility:**
   - *"What is on my screen?"*
   - *"Describe this window."*
   - *"Read the text displayed here."*
-- **Computer Navigation:**
-  - *"Open the browser."*
-  - *"Open Safari."*
-  - *"Scroll down."* / *"Scroll up."*
-  - *"Close this window."*
 - **Sensitive Operations (Guarded):**
   - *"Delete this file."*
   - SAHAYAK replies: *"I understood you want to delete something. Because this is permanent, please confirm: do you want me to proceed with deleting it?"*
-  - Speak *"Yes"* or press <kbd>Enter</kbd> to confirm, or press <kbd>Esc</kbd> to cancel.
 
 ---
 
 ## 11. Automated Testing
 
-To run the complete 15-test automated test suite:
+To run the complete 41-test automated test suite across all 5 modules:
 
 ```bash
-venv/bin/pytest tests/test_sahayak_e2e.py -v -s
+venv/bin/pytest tests/test_gemini_ai_multimodel.py tests/test_floating_and_wakeword.py tests/test_search_intents.py tests/test_sahayak_e2e.py tests/test_multitasking_sequential.py -v
 ```
 
-All 8 mandatory project test cases are verified:
-- [x] Test Case 1: Greeting & spoken response.
-- [x] Test Case 2: Screen capture & spoken description.
-- [x] Test Case 3: Read on-screen text aloud.
-- [x] Test Case 4: Launch browser.
-- [x] Test Case 5: Scroll down.
-- [x] Test Case 6: Sensitive action confirmation.
-- [x] Test Case 7: Graceful offline fallback when Gemini is disconnected.
-- [x] Test Case 8: Permissions & error handling.
+### Verified Test Suites:
+- [x] **Gemini AI Multi-Model Resilience** (`test_gemini_ai_multimodel.py` - 7 tests): Real AI explanations, learning plans, RAM vs storage comparisons, distinct knowledge generation, multi-model failover, and offline diagnostics.
+- [x] **Global Wake Word & Floating Companion** (`test_floating_and_wakeword.py` - 6 tests): Wake word phrase detection, negative suppression, inline extraction, lifecycle, `/popup` endpoint, active app context.
+- [x] **Search Intent Separation** (`test_search_intents.py` - 8 tests): `website_search`, `browser_search`, `system_search`, `open_website`, `open_application`, phrasing variations, and failure verification.
+- [x] **Core End-to-End Suite** (`test_sahayak_e2e.py` - 15 tests): Core system status, TTS voices, Apple Vision OCR, screen capture, 8 mandatory test cases, WebSocket communication, SQLite memory persistence.
+- [x] **Multitasking & Sequential Execution** (`test_multitasking_sequential.py` - 5 tests): Conjunction splitting, sequential execution, native Apple Notes integration, task cancellation, and truthful file search.
 
 ---
 

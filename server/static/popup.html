@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SAHAYAK — Floating Assistant</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --text: #ffffff;
+      --accent: #ffd700;
+      --neon-cyan: #00ffcc;
+      --border: #30363d;
+      --danger: #ff4d4f;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      padding: 16px;
+      user-select: none;
+      font-size: 13px;
+      overflow-x: hidden;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 12px;
+    }
+    .brand {
+      font-weight: 700;
+      font-size: 15px;
+      color: var(--accent);
+      letter-spacing: 0.5px;
+    }
+    .pills {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .pill {
+      font-size: 10px;
+      padding: 3px 7px;
+      border-radius: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .pill-online { background: rgba(0, 255, 204, 0.15); color: var(--neon-cyan); border: 1px solid var(--neon-cyan); }
+    .pill-offline { background: rgba(255, 77, 79, 0.15); color: var(--danger); border: 1px solid var(--danger); }
+    .pill-mic { background: rgba(255, 215, 0, 0.15); color: var(--accent); border: 1px solid var(--accent); }
+
+    .transcript-box {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      min-height: 120px;
+      max-height: 180px;
+      overflow-y: auto;
+      margin-bottom: 12px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .transcript-role { font-weight: 700; font-size: 11px; margin-bottom: 2px; }
+    .role-user { color: var(--accent); }
+    .role-ai { color: var(--neon-cyan); margin-top: 6px; }
+
+    .task-box {
+      background: rgba(255, 215, 0, 0.08);
+      border: 1px solid rgba(255, 215, 0, 0.25);
+      border-radius: 6px;
+      padding: 8px;
+      font-size: 11px;
+      margin-bottom: 12px;
+      display: none;
+    }
+    .task-title { font-weight: bold; color: var(--accent); margin-bottom: 4px; }
+
+    .input-row {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    input[type="text"] {
+      flex: 1;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      color: #fff;
+      font-size: 13px;
+      outline: none;
+    }
+    input[type="text"]:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(255, 215, 0, 0.2);
+    }
+    button {
+      background: var(--accent);
+      color: #000;
+      border: none;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 12px;
+      padding: 8px 12px;
+      cursor: pointer;
+      transition: opacity 0.15s ease;
+    }
+    button:hover { opacity: 0.9; }
+    .btn-cancel {
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid var(--danger);
+    }
+    .btn-cancel:hover { background: rgba(255, 77, 79, 0.1); }
+    .actions-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 10px;
+      color: #8b949e;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="brand">SAHAYAK</div>
+    <div class="pills">
+      <span id="gemini-pill" class="pill pill-online">AI: Online</span>
+      <span id="mic-pill" class="pill pill-mic">🎙️ HELLO SAHAY</span>
+    </div>
+  </div>
+
+  <div id="task-box" class="task-box">
+    <div class="task-title" id="task-header">Task in Progress</div>
+    <div id="task-step-desc">Executing steps...</div>
+  </div>
+
+  <div id="transcript" class="transcript-box">
+    <div class="transcript-role role-ai">SAHAYAK</div>
+    <div id="latest-response">Ready. Say "HELLO SAHAY" from any application, or type below.</div>
+  </div>
+
+  <div class="input-row">
+    <input type="text" id="cmd-input" placeholder="Type instruction (or speak)..." autocomplete="off" />
+    <button id="send-btn" type="button">Send</button>
+  </div>
+
+  <div class="actions-row">
+    <button id="cancel-btn" type="button" class="btn-cancel">Cancel Task</button>
+    <span>Shortcut: <strong>Option + Space</strong></span>
+  </div>
+
+  <script>
+    const transcript = document.getElementById("transcript");
+    const latestResponse = document.getElementById("latest-response");
+    const cmdInput = document.getElementById("cmd-input");
+    const sendBtn = document.getElementById("send-btn");
+    const cancelBtn = document.getElementById("cancel-btn");
+    const geminiPill = document.getElementById("gemini-pill");
+    const taskBox = document.getElementById("task-box");
+    const taskHeader = document.getElementById("task-header");
+    const taskStepDesc = document.getElementById("task-step-desc");
+
+    // Poll status periodically
+    async function updateStatus() {
+      try {
+        const res = await fetch("/api/status");
+        if (res.ok) {
+          const d = await res.json();
+          const conn = d.connection_state || (d.gemini_configured ? "online" : "offline");
+          if (conn === "online") {
+            geminiPill.className = "pill pill-online";
+            geminiPill.textContent = "AI: " + (d.gemini_model || "Online");
+          } else {
+            geminiPill.className = "pill pill-offline";
+            geminiPill.textContent = "AI: Offline";
+          }
+
+          if (d.active_task && d.active_task.active) {
+            taskBox.style.display = "block";
+            taskHeader.textContent = "Task: " + d.active_task.current_step + "/" + d.active_task.total_steps;
+            taskStepDesc.textContent = d.active_task.instruction;
+          } else {
+            taskBox.style.display = "none";
+          }
+        }
+      } catch (e) {}
+    }
+    setInterval(updateStatus, 2000);
+    updateStatus();
+
+    async function sendCommand(text) {
+      if (!text.trim()) return;
+      latestResponse.textContent = "Processing: " + text + "...";
+      cmdInput.value = "";
+
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text })
+        });
+        const data = await res.json();
+        latestResponse.textContent = data.spoken_response || "Action completed.";
+      } catch (err) {
+        latestResponse.textContent = "Error: " + err.message;
+      }
+    }
+
+    sendBtn.addEventListener("click", () => sendCommand(cmdInput.value));
+    cmdInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") sendCommand(cmdInput.value);
+    });
+
+    cancelBtn.addEventListener("click", async () => {
+      try {
+        await fetch("/api/tasks/cancel", { method: "POST" });
+        latestResponse.textContent = "Task cancelled.";
+        taskBox.style.display = "none";
+      } catch (e) {}
+    });
+  </script>
+</body>
+</html>
+

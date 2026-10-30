@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import threading
 import typing
 from datetime import datetime
@@ -36,6 +37,10 @@ from pydantic import BaseModel, Field
 
 # Load project environment variables
 load_dotenv()
+
+_SERVER_DIR = Path(__file__).resolve().parent
+if str(_SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(_SERVER_DIR))
 
 # Import SAHAYAK core engines
 from tts_engine import tts
@@ -66,6 +71,7 @@ from gemini_engine import (
     AgentAction,
     GEMINI_MODEL_ID,
 )
+from task_engine import task_engine
 from stt_engine import stt
 
 logging.basicConfig(
@@ -149,6 +155,18 @@ def fetch_recent_sessions(limit: int = 5) -> list[dict]:
     return [{"task": r[0], "outcome": r[1], "summary": r[2], "started_at": r[3]} for r in rows]
 
 
+def get_recent_history(limit: int = 4) -> list[dict]:
+    """Formats recent conversational turns for contextual Gemini reasoning."""
+    sessions = fetch_recent_sessions(limit)
+    history = []
+    for s in reversed(sessions):
+        if s.get("task"):
+            history.append({"role": "user", "content": s["task"]})
+        if s.get("summary"):
+            history.append({"role": "assistant", "content": s["summary"]})
+    return history
+
+
 # ---------------------------------------------------------------------------
 # Request & Response Schemas
 # ---------------------------------------------------------------------------
@@ -180,25 +198,60 @@ async def get_index():
     return {"message": "SAHAYAK Backend Running", "status": "ok"}
 
 
+@app.get("/popup")
+async def get_popup():
+    """Serves the compact accessible floating popup."""
+    popup_file = STATIC_DIR / "popup.html"
+    if popup_file.exists():
+        return FileResponse(str(popup_file))
+    return FileResponse(str(STATIC_DIR / "index.html"))
+
+
 @app.get("/api/status")
 async def get_system_status():
-    """Returns real-time status of AI engines, local permissions, and screen context."""
+    """Returns real-time status of AI engines, local permissions, screen context, and tasks."""
     app_ctx = get_active_app_context()
     screen_size = get_logical_screen_size()
+    diagnostics = gemini_engine.get_diagnostics()
     return {
         "project": "SAHAYAK",
         "tagline": "Your Voice. Your Freedom.",
         "gemini_configured": gemini_engine.is_available(),
         "gemini_model": GEMINI_MODEL_ID,
-        "operating_mode": "Gemini 3.8 Flash + Local Fallback" if gemini_engine.is_available() else "Local Offline Mode",
+        "active_model": diagnostics.get("active_model", GEMINI_MODEL_ID),
+        "connection_state": diagnostics.get("status", "offline"),
+        "operating_mode": f"Gemini ({diagnostics.get('active_model')}) + Local Fallback" if gemini_engine.is_available() else "Local Offline Mode",
         "tts_available": True,
         "tts_engine": "macOS Native (say)",
         "stt_engine": "Local Whisper (faster-whisper) + Web Speech",
         "vision_ocr_available": True,
         "active_app": app_ctx.get("app_name", "Finder"),
+        "window_title": app_ctx.get("window_title", ""),
         "tab_title": app_ctx.get("tab_title", ""),
+        "is_browser_active": app_ctx.get("is_browser_active", False),
         "screen_resolution": f"{screen_size[0]}x{screen_size[1]}",
+        "diagnostics": diagnostics,
+        "active_task": task_engine.get_status_payload(),
     }
+
+
+@app.get("/api/diagnostics")
+async def get_diagnostics():
+    """Returns real-time non-sensitive AI connectivity metrics."""
+    return gemini_engine.get_diagnostics()
+
+
+@app.get("/api/tasks/active")
+async def get_active_task_status():
+    """Returns live multitasking progress."""
+    return task_engine.get_status_payload()
+
+
+@app.post("/api/tasks/cancel")
+async def post_cancel_active_task():
+    """Cancels running multi-step task."""
+    cancelled = task_engine.cancel_active_task()
+    return {"status": "cancelled" if cancelled else "no_active_task"}
 
 
 @app.post("/api/speak")
@@ -250,8 +303,20 @@ async def post_chat(req: ChatRequest):
     logger.info(f"Incoming user instruction: '{raw_message}'")
     app_ctx = get_active_app_context()
 
-    # Step 1: Interpret intent
-    interpreted = await gemini_engine.interpret_intent(raw_message, app_ctx)
+    # Step 1: Intent Pre-classification & Speech Mishearing Recovery
+    raw_intent_check = classify_intent(raw_message)
+    if raw_intent_check.intent in (
+        IntentType.MULTISTEP_TASK,
+        IntentType.CONVERSATIONAL_AI,
+        IntentType.WEBSITE_SEARCH,
+        IntentType.BROWSER_SEARCH,
+        IntentType.SYSTEM_SEARCH,
+        IntentType.OPEN_WEBSITE,
+        IntentType.DESCRIBE_SCREEN,
+    ):
+        interpreted = raw_message
+    else:
+        interpreted = await gemini_engine.interpret_intent(raw_message, app_ctx)
 
     # Step 2: Capture screen context for vision-guided reasoning
     cap = capture_screen_image()
@@ -288,14 +353,92 @@ async def post_chat(req: ChatRequest):
             "screen_image": cap.get("image_base64"),
         }
 
-    # Step 5: Plan action via Gemini 3.8 Flash (or Local Rule Engine)
-    action: AgentAction = await gemini_engine.plan_action(
-        user_text=interpreted,
-        image_b64=cap.get("image_base64", ""),
-        app_context=app_ctx,
-        ocr_blocks=ocr_blocks,
-        step_number=1,
-    )
+    # Step 4a: Check Intent Classification (Conversational AI vs Multistep Task vs Actions)
+    intent_res = classify_intent(interpreted)
+
+    # Conversational AI (Q&A, explanations, learning plans, coding advice, error diagnostics)
+    if intent_res.intent == IntentType.CONVERSATIONAL_AI:
+        recent_history = get_recent_history(limit=4)
+        ai_response = await gemini_engine.chat_conversational(
+            user_query=interpreted,
+            screen_context=app_ctx,
+            ocr_blocks=ocr_blocks,
+            image_b64=cap.get("image_base64", ""),
+            history=recent_history,
+        )
+        tts.speak(ai_response)
+        store_session(interpreted, "complete", ai_response[:100])
+        return {
+            "requires_confirmation": False,
+            "spoken_response": ai_response,
+            "action": {"command": "conversational_answer", "text": ai_response},
+            "screen_image": cap.get("image_base64"),
+            "intent": "conversational_ai",
+            "diagnostics": gemini_engine.get_diagnostics(),
+        }
+
+    # Multistep Task Workflows
+    if intent_res.intent == IntentType.MULTISTEP_TASK:
+        task_session = await task_engine.execute_multistep_task(interpreted)
+        store_session(interpreted, task_session.status.value, task_session.spoken_summary[:100])
+        return {
+            "requires_confirmation": False,
+            "spoken_response": task_session.spoken_summary,
+            "action": {"command": "multistep_workflow", "task_id": task_session.task_id},
+            "task_session": task_session.model_dump(),
+            "screen_image": cap.get("image_base64"),
+            "intent": "multistep_task",
+            "diagnostics": gemini_engine.get_diagnostics(),
+        }
+
+    # Step 5: Construct or plan action
+    if intent_res.intent == IntentType.WEBSITE_SEARCH:
+        action = AgentAction(
+            command="website_search",
+            explanation=intent_res.explanation,
+            target_website=intent_res.target_website,
+            query=intent_res.query,
+            url=intent_res.url,
+            done=True,
+        )
+    elif intent_res.intent == IntentType.BROWSER_SEARCH:
+        action = AgentAction(
+            command="browser_search",
+            explanation=intent_res.explanation,
+            query=intent_res.query,
+            url=intent_res.url,
+            done=True,
+        )
+    elif intent_res.intent == IntentType.SYSTEM_SEARCH:
+        action = AgentAction(
+            command="system_search",
+            explanation=intent_res.explanation,
+            query=intent_res.query,
+            done=True,
+        )
+    elif intent_res.intent == IntentType.OPEN_WEBSITE:
+        action = AgentAction(
+            command="open_website",
+            explanation=intent_res.explanation,
+            url=intent_res.url,
+            target_website=intent_res.target_website,
+            done=True,
+        )
+    elif intent_res.intent == IntentType.OPEN_APPLICATION:
+        action = AgentAction(
+            command="open_application",
+            explanation=intent_res.explanation,
+            text=intent_res.target_app,
+            done=True,
+        )
+    else:
+        action: AgentAction = await gemini_engine.plan_action(
+            user_text=interpreted,
+            image_b64=cap.get("image_base64", ""),
+            app_context=app_ctx,
+            ocr_blocks=ocr_blocks,
+            step_number=1,
+        )
 
     if action.is_sensitive:
         prompt = action.confirmation_prompt or f"Please confirm before executing: {action.explanation}"
@@ -368,6 +511,8 @@ async def post_chat(req: ChatRequest):
         "action": action.model_dump(),
         "execution_result": exec_result,
         "screen_image": cap.get("image_base64"),
+        "intent": intent_res.intent.value,
+        "diagnostics": gemini_engine.get_diagnostics(),
     }
 
 

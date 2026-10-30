@@ -149,28 +149,58 @@ def perform_local_ocr_on_screen() -> list[dict]:
 def get_active_app_context() -> dict:
     """
     Extracts the currently active foreground application, window title,
-    and if a browser is active, the tab URL and title via AppleScript.
+    active document, and if a browser is active, the tab URL, title,
+    and site domain via AppleScript.
     """
-    context = {"app_name": "Finder", "tab_url": "", "tab_title": ""}
+    context = {
+        "app_name": "Finder",
+        "window_title": "",
+        "tab_url": "",
+        "tab_title": "",
+        "is_browser_active": False,
+        "is_document_active": False,
+        "is_finder_active": False,
+        "is_youtube_open": False,
+        "is_google_open": False,
+        "current_site_domain": "",
+    }
     if sys.platform != "darwin":
         return context
 
     try:
         script = (
             'tell application "System Events"\n'
-            '    set frontApp to name of first application process whose frontmost is true\n'
-            '    return frontApp\n'
+            '    set frontProc to first application process whose frontmost is true\n'
+            '    set appName to name of frontProc\n'
+            '    set winTitle to ""\n'
+            '    try\n'
+            '        if (count of windows of frontProc) > 0 then\n'
+            '            set winTitle to name of front window of frontProc\n'
+            '        end if\n'
+            '    end try\n'
+            '    return appName & "|||" & winTitle\n'
             'end tell'
         )
         r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=2)
-        app_name = r.stdout.strip()
-        if app_name:
-            context["app_name"] = app_name
+        out = r.stdout.strip()
+        if "|||" in out:
+            parts = out.split("|||", 1)
+            app_name = parts[0].strip() or "Finder"
+            context["window_title"] = parts[1].strip()
+        else:
+            app_name = out or "Finder"
+
+        context["app_name"] = app_name
+        context["is_finder_active"] = (app_name == "Finder")
+        context["is_document_active"] = app_name in ["Preview", "Pages", "Notes", "TextEdit", "Microsoft Word", "Acrobat"]
 
         # Browser tab info if applicable
+        known_browsers = ["Safari", "Google Chrome", "Chromium", "Arc", "Brave Browser", "Microsoft Edge", "Firefox"]
+        context["is_browser_active"] = any(b.lower() in app_name.lower() for b in known_browsers)
+
         url_script = None
         title_script = None
-        if app_name in ("Google Chrome", "Chromium"):
+        if app_name in ("Google Chrome", "Chromium", "Brave Browser"):
             url_script = 'tell application "Google Chrome" to return URL of active tab of front window'
             title_script = 'tell application "Google Chrome" to return title of active tab of front window'
         elif app_name == "Safari":
@@ -186,6 +216,20 @@ def get_active_app_context() -> dict:
         if title_script:
             t_res = subprocess.run(["osascript", "-e", title_script], capture_output=True, text=True, timeout=2)
             context["tab_title"] = t_res.stdout.strip()
+
+        # Domain analysis
+        tab_url_lower = context["tab_url"].lower()
+        if "youtube.com" in tab_url_lower:
+            context["is_youtube_open"] = True
+            context["current_site_domain"] = "youtube.com"
+        elif "google.com" in tab_url_lower:
+            context["is_google_open"] = True
+            context["current_site_domain"] = "google.com"
+        elif context["tab_url"]:
+            import urllib.parse
+            parsed = urllib.parse.urlparse(context["tab_url"])
+            context["current_site_domain"] = parsed.netloc
+
     except Exception as exc:
         logger.debug(f"get_active_app_context error: {exc}")
 
