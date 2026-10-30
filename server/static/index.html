@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SAHAYAK — Your Voice. Your Freedom.</title>
+  <meta name="description" content="Voice-first AI-powered computer accessibility assistant designed for blind and low-vision individuals.">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="theme-dark font-medium" id="app-body">
+  <!-- Accessibility Skip Link -->
+  <a href="#main-content" class="skip-link">Skip to main content</a>
+
+  <!-- ARIA Live Announcements for Screen Readers -->
+  <div id="sr-announcements-polite" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  <div id="sr-announcements-assertive" class="sr-only" aria-live="assertive" aria-atomic="true"></div>
+
+  <!-- Header Banner -->
+  <header role="banner" class="app-header">
+    <div class="header-container">
+      <div class="brand-group">
+        <div class="brand-icon" aria-hidden="true">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="22"/>
+            <line x1="8" y1="22" x2="16" y2="22"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">SAHAYAK</h1>
+          <p class="brand-tagline">Your Voice. Your Freedom.</p>
+        </div>
+      </div>
+
+      <!-- Quick Accessibility Controls in Header -->
+      <div class="header-controls" role="toolbar" aria-label="Quick Accessibility Controls">
+        <button id="btn-theme-toggle" class="btn btn-outline" aria-label="Toggle high contrast mode" title="Toggle high contrast mode (Alt+T)">
+          <span class="btn-icon" aria-hidden="true">🌓</span>
+          <span class="btn-text">Contrast</span>
+        </button>
+        <button id="btn-font-larger" class="btn btn-outline" aria-label="Increase text size" title="Increase text size">
+          <span class="btn-icon" aria-hidden="true">A+</span>
+          <span class="btn-text">Larger</span>
+        </button>
+        <button id="btn-font-smaller" class="btn btn-outline" aria-label="Decrease text size" title="Decrease text size">
+          <span class="btn-icon" aria-hidden="true">A-</span>
+          <span class="btn-text">Smaller</span>
+        </button>
+        <div class="status-badge" id="system-status-badge" role="status" aria-label="System status">
+          <span class="status-dot status-ready" id="status-dot"></span>
+          <span id="status-text">Ready</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content Layout -->
+  <main id="main-content" role="main" class="main-container">
+    
+    <!-- Primary Voice Hero Section -->
+    <section class="voice-hero-card" aria-labelledby="voice-section-title">
+      <div class="voice-hero-header">
+        <h2 id="voice-section-title" class="section-title">Voice Interaction</h2>
+        <span class="shortcut-hint" aria-hidden="true">Press <kbd>Space</kbd> or click to Speak</span>
+      </div>
+
+      <div class="voice-control-center">
+        <!-- Giant Accessible Mic Button -->
+        <button id="btn-mic-toggle" class="btn-mic" aria-label="Activate microphone to give voice command" aria-pressed="false">
+          <div class="mic-visual" aria-hidden="true">
+            <svg class="mic-svg" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+              <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+            </svg>
+          </div>
+          <span class="mic-label" id="mic-status-label">Start Listening</span>
+        </button>
+
+        <!-- Dynamic Soundwave / Status Indicator -->
+        <div class="audio-feedback-wave" id="audio-wave" aria-hidden="true">
+          <span class="wave-bar"></span>
+          <span class="wave-bar"></span>
+          <span class="wave-bar"></span>
+          <span class="wave-bar"></span>
+          <span class="wave-bar"></span>
+        </div>
+
+        <p class="voice-status-description" id="voice-status-desc" role="status">
+          Microphone is ready. Press Space or click the button to speak.
+        </p>
+      </div>
+
+      <!-- Quick Command Buttons for Low-Vision Navigation -->
+      <div class="quick-commands" role="group" aria-label="Quick voice command shortcuts">
+        <span class="quick-commands-label">Suggested Voice Commands:</span>
+        <button class="btn btn-chip" data-cmd="What is on my screen?">"What is on my screen?"</button>
+        <button class="btn btn-chip" data-cmd="Read the text displayed here.">"Read this text"</button>
+        <button class="btn btn-chip" data-cmd="Open the browser.">"Open browser"</button>
+        <button class="btn btn-chip" data-cmd="Scroll down.">"Scroll down"</button>
+        <button class="btn btn-chip" data-cmd="Explain this window.">"Explain this window"</button>
+      </div>
+    </section>
+
+    <!-- Interactive Workspace Grid -->
+    <div class="workspace-grid">
+
+      <!-- Left Column: Spoken Response & Live Transcript -->
+      <section class="card panel-transcript" aria-labelledby="transcript-title">
+        <div class="card-header">
+          <h2 id="transcript-title" class="panel-heading">Spoken Responses & Transcript</h2>
+          <button id="btn-replay-last" class="btn btn-sm btn-outline" aria-label="Replay last spoken response" title="Replay last spoken response">
+            <span aria-hidden="true">🔊</span> Replay
+          </button>
+        </div>
+
+        <!-- Latest Spoken Feedback Highlight -->
+        <div class="latest-spoken-box" id="latest-spoken-container" role="region" aria-label="Latest spoken feedback">
+          <div class="spoken-icon" aria-hidden="true">📢</div>
+          <div class="spoken-content">
+            <span class="spoken-label">SAHAYAK Said:</span>
+            <p id="latest-spoken-text" class="spoken-text">Welcome to SAHAYAK. I am ready to help you navigate and interact with your computer.</p>
+          </div>
+        </div>
+
+        <!-- History Log of Interactions -->
+        <div class="transcript-scroll-area" id="transcript-log" role="log" aria-label="Conversation history" tabindex="0">
+          <!-- Filled dynamically by JavaScript -->
+          <div class="transcript-entry agent-entry">
+            <span class="entry-meta">SAHAYAK</span>
+            <p class="entry-body">System initialized. Connected to local assistive engine.</p>
+          </div>
+        </div>
+
+        <!-- Text Input Fallback (Accessibility Fallback) -->
+        <form id="text-command-form" class="text-input-form" aria-label="Text command fallback">
+          <label for="text-command-input" class="sr-only">Type a command if you cannot speak</label>
+          <input type="text" id="text-command-input" class="input-text" placeholder="Or type a command here (e.g. 'read screen')..." autocomplete="off">
+          <button type="submit" class="btn btn-primary" id="btn-send-text">Send</button>
+        </form>
+      </section>
+
+      <!-- Right Column: Screen Understanding & Computer Actions -->
+      <section class="card panel-screen" aria-labelledby="screen-panel-title">
+        <div class="card-header">
+          <h2 id="screen-panel-title" class="panel-heading">Screen Understanding & Actions</h2>
+          <button id="btn-refresh-screen" class="btn btn-sm btn-outline" aria-label="Capture and inspect screen now">
+            <span aria-hidden="true">📸</span> Inspect Screen
+          </button>
+        </div>
+
+        <!-- Screen Content Details -->
+        <div class="screen-details-area">
+          <!-- Screenshot Preview / Ruler View -->
+          <div class="screenshot-viewport" id="screenshot-viewport" tabindex="0" aria-label="Current captured screen with ruler coordinate grid">
+            <img id="screen-preview-img" src="" alt="Screen capture with coordinate grid" class="screen-img hidden">
+            <div id="screen-placeholder" class="screen-placeholder">
+              <span class="placeholder-icon" aria-hidden="true">🖥️</span>
+              <p>No screenshot captured yet. Say <strong>"What is on my screen?"</strong> or click Inspect.</p>
+            </div>
+          </div>
+
+          <!-- Active App Info -->
+          <div class="app-context-box" id="app-context-box" role="status" aria-label="Active application context">
+            <span class="context-label">Active Application:</span>
+            <span id="active-app-name" class="context-value">Detecting...</span>
+          </div>
+
+          <!-- Action Log & Pending Operations -->
+          <div class="actions-list-area">
+            <h3 class="subheading">Recent Actions Executed:</h3>
+            <ul id="actions-history-list" class="actions-list" role="list">
+              <li class="action-item"><span class="badge badge-info">INIT</span> SAHAYAK background services connected</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- System Diagnostics & Settings Drawer -->
+    <section class="card settings-drawer" aria-labelledby="settings-heading">
+      <div class="card-header">
+        <h2 id="settings-heading" class="panel-heading">Settings & System Health</h2>
+        <span class="badge badge-success" id="engine-mode-badge">Gemini Flash + Local Offline Active</span>
+      </div>
+
+      <div class="settings-grid">
+        <div class="setting-item">
+          <label for="select-tts-voice" class="setting-label">Speech Voice (macOS Native)</label>
+          <select id="select-tts-voice" class="select-field">
+            <option value="Samantha">Samantha (macOS Natural Female)</option>
+            <option value="Alex">Alex (macOS Natural Male)</option>
+            <option value="Fred">Fred (macOS Classic)</option>
+            <option value="Victoria">Victoria (macOS British)</option>
+          </select>
+        </div>
+
+        <div class="setting-item">
+          <label for="range-tts-rate" class="setting-label">Speaking Rate: <span id="rate-value-label">Normal (180 wpm)</span></label>
+          <input type="range" id="range-tts-rate" min="120" max="280" value="180" step="10" class="range-slider">
+        </div>
+
+        <div class="setting-item">
+          <span class="setting-label">Gemini 3.8 Flash AI Model</span>
+          <div class="config-status-row">
+            <span id="gemini-status-indicator" class="badge badge-warning">Checking key...</span>
+            <span class="setting-hint" id="gemini-status-hint">Set in server/.env</span>
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <span class="setting-label">macOS Permissions</span>
+          <div class="perm-badges">
+            <span class="perm-tag" id="perm-mic">🎤 Mic: OK</span>
+            <span class="perm-tag" id="perm-screen">🖥️ Screen: OK</span>
+            <span class="perm-tag" id="perm-a11y">♿ A11y: OK</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- SENSITIVE OPERATION CONFIRMATION MODAL (ACCESSIBILITY CRITICAL) -->
+  <div id="confirmation-dialog" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-desc">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-alert-icon" aria-hidden="true">⚠️</div>
+        <h2 id="modal-title" class="modal-title">Confirmation Required</h2>
+      </div>
+      <div class="modal-body">
+        <p id="modal-desc" class="modal-desc">
+          SAHAYAK has detected a sensitive operation. Please confirm before proceeding.
+        </p>
+        <div class="target-action-box" id="modal-action-details">
+          <!-- Filled dynamically -->
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-modal-cancel" class="btn btn-secondary btn-lg" autofocus>
+          Cancel (Esc)
+        </button>
+        <button id="btn-modal-confirm" class="btn btn-danger btn-lg">
+          Yes, Proceed (Enter)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="app-footer" role="contentinfo">
+    <p>SAHAYAK — Your Voice. Your Freedom. Designed for Apple Silicon macOS.</p>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+

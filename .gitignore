@@ -1,0 +1,52 @@
+# Environment & Secrets (NEVER COMMIT API KEYS)
+.env
+.env.*
+!.env.example
+server/.env
+client/.env
+
+# Python & Virtual Environments
+venv/
+server/venv/
+client/venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing & Cache
+.pytest_cache/
+.coverage
+htmlcov/
+.cache/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Legacy binary wake word
+HeySai_mac.ppn
+test_venv/
