@@ -3,6 +3,8 @@ import websockets
 import json
 import time
 
+__test__ = False  # Developer manual script, not a pytest test function
+
 async def test_client():
     uri = "ws://localhost:8080/ws/agent"
     async with websockets.connect(uri) as websocket:

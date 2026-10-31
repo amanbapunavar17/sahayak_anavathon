@@ -31,6 +31,10 @@ class IntentType(str, Enum):
     COMPUTER_CONTROL = "computer_control"
     CONVERSATIONAL_AI = "conversational_ai"
     MULTISTEP_TASK = "multistep_task"
+    TAKE_PHOTO = "take_photo"
+    CLICK_ELEMENT = "click_element"
+    MOUSE_CONTROL = "mouse_control"
+    LANGUAGE_SWITCH = "language_switch"
 
 
 class IntentResult(BaseModel):
@@ -38,9 +42,16 @@ class IntentResult(BaseModel):
     query: typing.Optional[str] = None
     target_website: typing.Optional[str] = None
     target_app: typing.Optional[str] = None
+    target_bundle_id: typing.Optional[str] = None
     url: typing.Optional[str] = None
+    target_element: typing.Optional[str] = None
+    click_type: str = "single"  # single, double, right, triple
+    button: str = "left"        # left, right, middle
+    x: typing.Optional[int] = None
+    y: typing.Optional[int] = None
     confidence: float = 1.0
     explanation: str = ""
+    language: typing.Optional[str] = None
 
 
 # Known popular websites with standard search URLs
@@ -108,7 +119,8 @@ MAC_SYSTEM_APPS = {
     "facetime", "messages", "music", "podcasts", "tv", "keynote", "pages",
     "numbers", "preview", "textedit", "activity monitor", "app store",
     "safari", "google chrome", "chrome", "arc", "firefox", "brave", "edge",
-    "browser", "default browser", "slack", "vscode", "visual studio code"
+    "browser", "default browser", "slack", "vscode", "visual studio code",
+    "camera", "photo booth"
 }
 
 # Explicit local file/system search indicators
@@ -162,6 +174,128 @@ def clean_query(q: str) -> str:
     return q
 
 
+def parse_mouse_and_click_intent(raw: str, lower: str) -> typing.Optional[IntentResult]:
+    """
+    Parses mouse movement and button click instructions into structured CLICK_ELEMENT
+    and MOUSE_CONTROL intents with target element names, click types, or coordinates.
+    """
+    # Exclude conversational questions
+    if any(lower.startswith(q) for q in ["how do i", "how to", "why does", "what is", "tell me about", "explain"]):
+        return None
+
+    # Check for coordinate pattern: e.g. "at 450, 300", "(450, 300)", "at 450 300", "x=450 y=300"
+    coord_x, coord_y = None, None
+    m_coord = re.search(r"(?:at\s+|coordinate[s]?\s+|position\s+|\()?(\d{1,4})\s*(?:,\s*|\s+and\s+|\s+)(\d{1,4})\)?", lower)
+    if m_coord:
+        try:
+            coord_x = int(m_coord.group(1))
+            coord_y = int(m_coord.group(2))
+        except (ValueError, IndexError):
+            pass
+
+    # 1. Double Click
+    if re.search(r"\bdouble\s*[- ]?click\b", lower):
+        target = re.sub(r".*?\bdouble\s*[- ]?click(?:\s+on|\s+at)?(?:\s+the)?(?:\s+button)?(?:\s+named|\s+called)?\s*", "", lower).strip()
+        target = re.sub(r"^(?:the\s+)?button\s+", "", target)
+        target = re.sub(r"\s+(?:button|icon|tab|link|field|box)$", "", target)
+        target = target.strip(" .,;:-_!?()[]'\"`")
+        if target in ("here", "current", "this", "now", "") and coord_x is None:
+            target = None
+        return IntentResult(
+            intent=IntentType.CLICK_ELEMENT,
+            query=raw,
+            target_element=target if target else None,
+            click_type="double",
+            button="left",
+            x=coord_x,
+            y=coord_y,
+            explanation=f"Double clicking {target or 'at current position'}.",
+        )
+
+    # 2. Right Click
+    if re.search(r"\bright\s*[- ]?click\b", lower):
+        target = re.sub(r".*?\bright\s*[- ]?click(?:\s+on|\s+at)?(?:\s+the)?(?:\s+button)?(?:\s+named|\s+called)?\s*", "", lower).strip()
+        target = re.sub(r"^(?:the\s+)?button\s+", "", target)
+        target = re.sub(r"\s+(?:button|icon|tab|link|field|box)$", "", target)
+        target = target.strip(" .,;:-_!?()[]'\"`")
+        if target in ("here", "current", "this", "now", "") and coord_x is None:
+            target = None
+        return IntentResult(
+            intent=IntentType.CLICK_ELEMENT,
+            query=raw,
+            target_element=target if target else None,
+            click_type="right",
+            button="right",
+            x=coord_x,
+            y=coord_y,
+            explanation=f"Right clicking {target or 'at current position'}.",
+        )
+
+    # 3. Triple Click
+    if re.search(r"\btriple\s*[- ]?click\b", lower):
+        target = re.sub(r".*?\btriple\s*[- ]?click(?:\s+on|\s+at)?(?:\s+the)?(?:\s+button)?(?:\s+named|\s+called)?\s*", "", lower).strip()
+        target = re.sub(r"\s+(?:button|icon|tab|link|field|box)$", "", target).strip(" .,;:-_!?()[]'\"`")
+        return IntentResult(
+            intent=IntentType.CLICK_ELEMENT,
+            query=raw,
+            target_element=target if target else None,
+            click_type="triple",
+            button="left",
+            x=coord_x,
+            y=coord_y,
+            explanation=f"Triple clicking {target or 'at current position'}.",
+        )
+
+    # 4. Mouse movement / Cursor glide
+    if re.search(r"\b(?:move\s+(?:the\s+)?(?:mouse|cursor)|glide\s+(?:the\s+)?(?:mouse|cursor)|hover\s+(?:on|over))\b", lower):
+        target = re.sub(r".*?\b(?:move\s+(?:the\s+)?(?:mouse|cursor)|glide\s+(?:the\s+)?(?:mouse|cursor)|hover\s+(?:on|over))(?:\s+to|\s+over|\s+at)?(?:\s+the)?\s*", "", lower).strip()
+        target = re.sub(r"\s+(?:button|icon|tab|link|field|box)$", "", target).strip(" .,;:-_!?()[]'\"`")
+        return IntentResult(
+            intent=IntentType.MOUSE_CONTROL,
+            query=raw,
+            target_element=target if target else None,
+            x=coord_x,
+            y=coord_y,
+            explanation=f"Moving mouse cursor to {target or 'specified location'}.",
+        )
+
+    # 5. Single Click / Button Click / Press button / Tap button
+    is_click_pattern = bool(re.search(
+        r"^(?:please\s+)?(?:click(?:\s+on|\s+at)?|press\s+(?:the\s+)?|tap\s+(?:the\s+)?|single\s+click(?:\s+on)?)\s+",
+        lower
+    )) or lower in ("click", "click here", "single click", "click on it", "click it")
+
+    if not is_click_pattern:
+        if re.search(r"\bclick\s+(?:the\s+)?button\b", lower) or re.search(r"\bbutton\s+click\b", lower):
+            is_click_pattern = True
+
+    if is_click_pattern:
+        target = re.sub(r"^(?:please\s+)?(?:click(?:\s+on|\s+at)?|press|tap|single\s+click(?:\s+on)?)\s+", "", lower).strip()
+        target = re.sub(r"^(?:the\s+)?button\s+(?:named\s+|called\s+)?", "", target)
+        target = re.sub(r"^(?:the\s+)", "", target)
+        target = re.sub(r"\s+(?:button|icon|tab|link|field|box)$", "", target)
+        target = target.strip(" .,;:-_!?()[]'\"`")
+
+        if coord_x is not None and coord_y is not None:
+            target = re.sub(r"(?:at\s+|\()?\s*\d{1,4}\s*(?:,\s*|\s+and\s+|\s+)\d{1,4}\)?", "", target).strip(" .,;:-_!?()[]'\"`")
+
+        if target in ("here", "current", "this", "now", "it", "click", ""):
+            target = None
+
+        return IntentResult(
+            intent=IntentType.CLICK_ELEMENT,
+            query=raw,
+            target_element=target if target else None,
+            click_type="single",
+            button="left",
+            x=coord_x,
+            y=coord_y,
+            explanation=f"Clicking {target or 'at coordinates' if coord_x is not None else 'at current cursor position'}.",
+        )
+
+    return None
+
+
 def classify_intent(text: str) -> IntentResult:
     """
     Rule-based deterministic classifier that implements the 5 distinct search/navigation intents
@@ -169,6 +303,39 @@ def classify_intent(text: str) -> IntentResult:
     """
     raw = text.strip()
     lower = raw.lower()
+
+    # 0. Language Switch intent
+    lang_patterns = [
+        (
+            r"\b(?:switch|change|talk|speak|respond|reply|translate|converse|use|tell\s+me)\b.*\bkannada\b"
+            r"|\bkannada\s+(?:language|please|only|mode)\b"
+            r"|\b(?:in\s+kannada|to\s+kannada)\b"
+            r"|\b(?:kannadadalli|kannada\s+mathadi|kannada\s+bheku|kannadadalli\s+mathadi)\b"
+            r"|(?:ಕನ್ನಡ|ಕನ್ನಡದಲ್ಲಿ|ಮಾತನಾಡು|ಹೇಳು)",
+            "kn"
+        ),
+        (
+            r"\b(?:switch|change|talk|speak|respond|reply|translate|converse|use|tell\s+me)\b.*\benglish\b"
+            r"|\benglish\s+(?:language|please|only|mode)\b"
+            r"|\b(?:in\s+english|to\s+english)\b",
+            "en-US"
+        ),
+        (
+            r"\b(?:switch|change|talk|speak|respond|reply|translate|converse|use|tell\s+me)\b.*\bhindi\b"
+            r"|\bhindi\s+(?:language|please|only|mode)\b"
+            r"|\b(?:in\s+hindi|to\s+hindi)\b"
+            r"|\b(?:hindi\s+mein|hindi\s+bolo)\b",
+            "hi"
+        ),
+    ]
+    for pat, lang_code in lang_patterns:
+        if re.search(pat, lower):
+            return IntentResult(
+                intent=IntentType.LANGUAGE_SWITCH,
+                query=raw,
+                language=lang_code,
+                explanation=f"User requested switching language to {lang_code}."
+            )
 
     # 1. Sensitive operations
     for pat in SENSITIVE_PATTERNS:
@@ -187,45 +354,108 @@ def classify_intent(text: str) -> IntentResult:
             explanation="Request to describe or read visible screen content.",
         )
 
-    # 3. Multistep Task Workflows (Sequential Multi-action)
-    # Examples:
-    #   "Open YouTube, search for Python tutorials, find a beginner tutorial, summarize it and save to Notes."
-    #   "Open Safari, then open Notes and write down my next three tasks."
-    #   "Find my project PDF, read it and tell me its main points."
-    #   "Open Google, search for AI developments, collect the main points and explain them."
-    is_open_browser_search = bool(re.match(r"^open\s+(?:the\s+)?browser\s+and\s+search\s+", lower))
-    has_seq_conjunction = bool(re.search(r"\b(?:then|and\s+then|after\s+that)\b", lower))
-    has_notes_chain = ("notes" in lower and any(w in lower for w in ["write", "save", "tasks", "create"])) and any(w in lower for w in ["open", "search", "find", "summarize", "read"])
-    has_summarize_chain = any(w in lower for w in ["summarize", "main points", "collect the main"]) and any(w in lower for w in ["open", "search", "find", "pdf", "read", "inspect", "google", "youtube"])
-    has_read_and_tell = bool(re.search(r"\bread\s+(?:it|this|the\s+pdf|my\s+pdf)\s+and\s+(?:tell|summarize|explain)\b", lower))
-
-    if not is_open_browser_search and (has_seq_conjunction or has_notes_chain or has_summarize_chain or has_read_and_tell):
+    # 2b. Camera and Photo Capture Intent
+    is_take_photo = bool(re.search(
+        r"\b(?:take\s+(?:a\s+)?(?:picture|photo|selfie|snapshot)|capture\s+(?:a\s+)?(?:picture|photo)|snap\s+(?:a\s+)?(?:picture|photo)|open\s+(?:the\s+)?camera\s+and\s+take\s+(?:a\s+)?(?:picture|photo))\b",
+        lower
+    ))
+    has_camera_multistep = ("camera" in lower or "picture" in lower or "photo" in lower) and any(w in lower for w in ["notes", "then", "after that", "tell me where", "where the picture was saved"])
+    if is_take_photo and not has_camera_multistep:
         return IntentResult(
-            intent=IntentType.MULTISTEP_TASK,
+            intent=IntentType.TAKE_PHOTO,
             query=raw,
-            explanation=f"Multi-step task workflow: '{raw}'.",
+            target_app="Photo Booth",
+            explanation="Autonomous camera capture workflow using Photo Booth.",
         )
 
-    # 4. Conversational AI & General Knowledge
-    # Questions, explanations, learning plans, coding advice, error diagnostics
+    # 3. Conversational AI & General Knowledge
+    # Questions, explanations, learning plans, coding advice, error diagnostics, greetings, advice
     conversational_patterns = [
-        r"^(?:hello\s+sahayak|hi\s+sahayak|hello\s+sahay|hey\s+sahay|sahayak|sahay)[,\s]*$",
-        r"\b(?:explain|what\s+is|what\s+are|what's|difference\s+between|how\s+does|how\s+do\s+i|tell\s+me\s+about|why\s+is|who\s+is)\b",
-        r"\b(?:create|generate|write|make)\s+(?:a|an|me\s+a)?\s+.*(?:plan|guide|routine|schedule|roadmap|tutorial|essay|code|program|script|summary)\b",
+        r"^(?:hello|hi|hey)\s+(?:sahayak|sahay|sahayaka)[,\s!]*$",
+        r"^(?:sahayak|sahay|sahayaka)[,\s!]*$",
+        r"^(?:hello|hi|hey|good\s+morning|good\s+afternoon|good\s+evening|namaste|namaskara)[,\s!]*$",
+        r"\b(?:explain|what\s+is|what\s+are|what's|difference\s+between|how\s+does|how\s+do\s+i|tell\s+me\s+about|why\s+is|who\s+is|who\s+are\s+you|who\s+made\s+you)\b",
+        r"\b(?:where\s+is|where\s+are|when\s+was|when\s+is|which\s+is|whose)\b",
+        r"\b(?:can\s+you\s+explain|could\s+you\s+explain|can\s+you\s+tell\s+me|could\s+you\s+tell\s+me|help\s+me\s+with|how\s+can\s+i|do\s+you\s+know|do\s+you\s+have)\b",
+        r"\b(?:create|generate|write|make)\s+(?:a|an|me\s+a)?\s+.*(?:plan|guide|routine|schedule|roadmap|tutorial|essay|code|program|script|summary|story|poem|recipe|list)\b",
         r"\b(?:learning\s+plan|study\s+plan)\b",
         r"\b(?:organize\s+my\s+work|plan\s+my\s+day|help\s+me\s+(?:learn|understand|write|organize))\b",
         r"\b(?:don't\s+understand\s+this\s+error|explain\s+(?:this\s+)?error|what\s+does\s+this\s+mean|fix\s+this\s+error)\b",
+        r"\b(?:give\s+me|suggest|recommend|advise|tell\s+me\s+(?:a|some)?)\b",
+        r"[\u0c80-\u0cff]",  # Any Kannada text is conversational by default
+        r"[\u0900-\u097f]",  # Any Devanagari text is conversational by default
     ]
-    is_conversational = any(re.search(pat, lower) for pat in conversational_patterns)
-    # Check if not looking for a local file
+    # Check if this is an action command despite starting with polite phrasing or question mark
+    is_action_command = bool(
+        resolve_website_key(lower)
+        or any(w in lower for w in [
+            "look up", "search for", "find me", "search youtube", "search google",
+            "open ", "launch ", "click ", "press ", "tap ", "type ", "scroll ",
+            "delete ", "create a folder", "move files", "system settings", "brightness"
+        ])
+    )
+    is_conversational = (
+        (any(re.search(pat, lower) for pat in conversational_patterns) or re.search(r"\?$", lower))
+        and not is_action_command
+    )
     if is_conversational and not any(w in lower for w in ["file named", "search my mac", "on my mac", "on my computer"]):
-        # Also ensure it's not a direct app opening like "open calculator"
         if not re.match(r"^(?:open|launch)\s+[a-zA-Z0-9\s]+$", lower):
             return IntentResult(
                 intent=IntentType.CONVERSATIONAL_AI,
                 query=raw,
                 explanation=f"Conversational AI inquiry: '{raw}'.",
             )
+
+    # 4. Multistep Task Workflows (Sequential Multi-action)
+    # Examples:
+    #   "Open YouTube, search for Python tutorials, find a beginner tutorial, summarize it and save to Notes."
+    #   "Open Safari, then open Notes and write down my next three tasks."
+    #   "Open Safari, search Google for artificial intelligence and return to Notes."
+    #   "Find the latest file in Downloads and open it."
+    #   "Open System Settings and change the display brightness."
+    #   "Open Safari, visit Google, and search for something."
+    #   "Create a folder and move these files into it."
+    #   "Open Notes and click New Note."
+    is_open_browser_search = bool(re.match(r"^open\s+(?:the\s+)?browser\s+and\s+search\s+", lower))
+    has_subsequent_action = bool(re.search(r"\b(?:and|then)\s+(?:play|select|click|open|watch)\b|(?:\b(?:second|first|third)\s+video\b)", lower))
+    is_single_website_search = (
+        bool(re.search(
+            r"^(?:open|go\s+to)\s+(?:the\s+browser\s+and\s+)?(?:the\s+)?(?:youtube|google|wikipedia|github|amazon|reddit|duckduckgo|bing)\s+and\s+(?:search|find|look\s+up)\b",
+            lower
+        ))
+        and not has_subsequent_action
+    )
+    has_seq_conjunction = bool(re.search(r"\b(?:then|and\s+then|after\s+that|next|finally|and\s+return\s+to|and\s+switch\s+back\s+to|;\s*)\b", lower))
+    has_clause_commas = bool(re.search(r",\s*(?:visit|open|search|find|change|set|adjust|create|make|move|read|write|tell|return|switch|play|select|watch)\b", lower))
+    has_and_action_verb = bool(re.search(r"\s+and\s+(?:change|set|adjust|visit|navigate|go\s+to|create|make|move|copy|read|write|tell|summarize|return|switch|download|save|open\s+it|click|double\s+click|right\s+click|press|tap|play|select|watch)\b", lower))
+    has_find_and_open = bool(re.search(r"\b(?:find|locate)\b.*\band\s+(?:open|read|tell|view|show)\b", lower))
+    has_create_and_move = bool(re.search(r"\b(?:create|make)\b.*\band\s+(?:move|put|copy|save)\b", lower))
+    has_notes_chain = ("notes" in lower and any(w in lower for w in ["write", "save", "tasks", "create", "note"])) and any(w in lower for w in ["open", "search", "find", "summarize", "read", "camera", "picture", "photo", "tell me"])
+    has_summarize_chain = any(w in lower for w in ["summarize", "main points", "collect the main"]) and any(w in lower for w in ["open", "search", "find", "pdf", "read", "inspect", "google", "youtube"])
+    has_read_and_tell = bool(re.search(r"\bread\s+(?:it|this|the\s+pdf|my\s+pdf|its\s+contents)\s+and\s+(?:tell|summarize|explain)\b", lower))
+    has_find_pdf_chain = ("find" in lower or "open" in lower) and "pdf" in lower and any(w in lower for w in ["read", "tell", "summarize", "contents"])
+
+    is_explicit_file_search = any(w in lower for w in ["file named", "search my mac", "on my mac", "on my computer", "search for the file"])
+    is_multistep_request = (
+        not is_explicit_file_search and not is_open_browser_search and not is_single_website_search and (
+            has_seq_conjunction or has_clause_commas or has_and_action_verb or
+            has_find_and_open or has_create_and_move or has_notes_chain or
+            has_summarize_chain or has_read_and_tell or has_find_pdf_chain or has_camera_multistep
+        )
+    )
+
+    if is_multistep_request:
+        return IntentResult(
+            intent=IntentType.MULTISTEP_TASK,
+            query=raw,
+            explanation=f"Multi-step task workflow: '{raw}'.",
+        )
+
+    # 4b. Mouse & Button Control Intents
+    # Direct clicking on buttons, UI elements, landmarks, coordinates, and cursor gliding
+    mouse_intent = parse_mouse_and_click_intent(raw, lower)
+    if mouse_intent:
+        return mouse_intent
 
     # 3. System Search (Mac Spotlight / File search)
     # Check if explicitly targeting local Mac files/folders/Spotlight
@@ -374,24 +604,39 @@ def classify_intent(text: str) -> IntentResult:
         )
 
     # 7. Open Application
-    # Examples: "Open Calculator", "Open Notes", "Open Safari", "Open the browser"
-    m_app = re.search(r"(?:open|launch)\s+(?:the\s+)?([a-zA-Z0-9\s]+)", lower)
+    # Examples: "Open Calculator", "Open Notes", "Open Safari", "Open the browser", "Open Camera"
+    NON_APP_TARGETS = {
+        "it", "them", "this", "that", "the file", "the app", "the window",
+        "the document", "the page", "the tab", "a folder", "the folder",
+        "files", "something"
+    }
+    m_app = re.search(r"^(?:open|launch)\s+(?:the\s+)?([a-zA-Z0-9\s]+?)(?:\s+(?:and|then|to|with)\b|\.|\,|$|\n)", lower)
+    if not m_app:
+        m_app = re.search(r"^(?:open|launch)\s+(?:the\s+)?([a-zA-Z0-9\s]+)$", lower)
     if m_app:
         candidate_app = m_app.group(1).strip()
-        # If candidate is "browser", resolve to default browser
-        if candidate_app in ["browser", "web browser", "internet browser", "safari", "chrome", "google chrome"]:
-            return IntentResult(
-                intent=IntentType.OPEN_APPLICATION,
-                target_app=candidate_app,
-                explanation="Opening default web browser.",
-            )
-        # Check against known Mac apps or non-search instructions
-        if candidate_app in MAC_SYSTEM_APPS or (not any(w in candidate_app for w in ["search", "find", "look up"])):
-            return IntentResult(
-                intent=IntentType.OPEN_APPLICATION,
-                target_app=candidate_app.title(),
-                explanation=f"Launching application {candidate_app.title()}.",
-            )
+        if candidate_app.lower() not in NON_APP_TARGETS:
+            if candidate_app in ["camera", "webcam", "photo booth"]:
+                return IntentResult(
+                    intent=IntentType.OPEN_APPLICATION,
+                    target_app="Photo Booth",
+                    target_bundle_id="com.apple.PhotoBooth",
+                    explanation="Launching camera application (Photo Booth).",
+                )
+            # If candidate is "browser", resolve to default browser
+            if candidate_app in ["browser", "web browser", "internet browser", "safari", "chrome", "google chrome"]:
+                return IntentResult(
+                    intent=IntentType.OPEN_APPLICATION,
+                    target_app=candidate_app,
+                    explanation="Opening default web browser.",
+                )
+            # Check against known Mac apps or non-search instructions
+            if candidate_app in MAC_SYSTEM_APPS or (not any(w in candidate_app for w in ["search", "find", "look up"])):
+                return IntentResult(
+                    intent=IntentType.OPEN_APPLICATION,
+                    target_app=candidate_app.title(),
+                    explanation=f"Launching application {candidate_app.title()}.",
+                )
 
     # 8. Standard Computer Control
     if "scroll down" in lower:

@@ -1,3 +1,4 @@
+
 """
 SAHAYAK — OS Accessibility Agent Server
 Tagline: Your Voice. Your Freedom.
@@ -21,6 +22,7 @@ import base64
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -64,8 +66,20 @@ from action_executor import (
     execute_website_search,
     execute_open_website,
     execute_open_application,
+    execute_take_photo,
+    execute_open_file,
+    execute_find_latest_file,
+    execute_create_folder,
+    execute_move_files,
+    execute_system_settings,
+    execute_click_element,
+    execute_mouse_move,
+    execute_double_click,
+    execute_right_click,
 )
+from mouse_controller import mouse_controller
 from intent_classifier import classify_intent, IntentType
+from session_context import SessionContext
 from gemini_engine import (
     gemini_engine,
     AgentAction,
@@ -179,6 +193,7 @@ class SpeakRequest(BaseModel):
     voice: typing.Optional[str] = None
     rate: typing.Optional[int] = None
     interrupt: bool = False
+    language: typing.Optional[str] = None
 
 
 class ConfirmationRequest(BaseModel):
@@ -225,6 +240,7 @@ async def get_system_status():
         "tts_engine": "macOS Native (say)",
         "stt_engine": "Local Whisper (faster-whisper) + Web Speech",
         "vision_ocr_available": True,
+        "mouse_controller_available": True,
         "active_app": app_ctx.get("app_name", "Finder"),
         "window_title": app_ctx.get("window_title", ""),
         "tab_title": app_ctx.get("tab_title", ""),
@@ -254,12 +270,33 @@ async def post_cancel_active_task():
     return {"status": "cancelled" if cancelled else "no_active_task"}
 
 
+@app.post("/api/emergency_stop")
+async def post_emergency_stop():
+    """
+    Global Emergency Stop:
+    1. Cancels any running multi-step tasks immediately.
+    2. Flushes and silences all Text-to-Speech audio immediately.
+    3. Resets active automation state.
+    4. Announces emergency stop to user.
+    """
+    task_cancelled = task_engine.cancel_active_task()
+    tts.stop()
+    msg = "Emergency stop activated. All operations halted."
+    tts.speak(msg, interrupt=True)
+    store_session("EMERGENCY_STOP", "halted", msg)
+    return {
+        "status": "stopped",
+        "task_cancelled": task_cancelled,
+        "spoken_response": msg,
+    }
+
+
 @app.post("/api/speak")
 async def post_speak(req: SpeakRequest):
     """Speaks text aloud using local macOS speech synthesis."""
     if not req.text:
         raise HTTPException(status_code=400, detail="Text is required")
-    tts.speak(req.text, voice=req.voice, rate=req.rate, interrupt=req.interrupt)
+    tts.speak(req.text, voice=req.voice, rate=req.rate, interrupt=req.interrupt, language=req.language)
     return {"status": "speaking", "text": req.text}
 
 
@@ -301,26 +338,73 @@ async def post_chat(req: ChatRequest):
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
     logger.info(f"Incoming user instruction: '{raw_message}'")
+    try:
+        return await _process_chat_message(raw_message)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Error handling post_chat for '{raw_message}': {exc}", exc_info=True)
+        current_lang = SessionContext.get_language()
+        if SessionContext.is_kannada(current_lang):
+            fallback_speech = "ಕ್ಷಮಿಸಿ, ಈ ವಿನಂತಿಯನ್ನು ಪ್ರಕ್ರಿಯೆಗೊಳಿಸುವಾಗ ಸಣ್ಣ ಸಮಸ್ಯೆ ಎದುರಾಯಿತು. ದಯವಿಟ್ಟು ಮತ್ತೊಮ್ಮೆ ಪ್ರಯತ್ನಿಸಿ."
+        else:
+            fallback_speech = "I am listening and ready for your next command."
+        tts.speak(fallback_speech, language=current_lang)
+        store_session(raw_message, "recovered_error", str(exc)[:80])
+        return {
+            "requires_confirmation": False,
+            "spoken_response": fallback_speech,
+            "action": {"command": "conversational_answer", "text": fallback_speech, "language": current_lang},
+            "error_detail": str(exc),
+            "diagnostics": gemini_engine.get_diagnostics(),
+        }
+
+
+async def _process_chat_message(raw_message: str) -> dict:
+    # Auto-detect script language so Kannada speech/text immediately sets Kannada context
+    if re.search(r"[\u0c80-\u0cff]", raw_message):
+        SessionContext.set_language("kn")
+        tts.set_language("kn")
+    elif re.search(r"[\u0900-\u097f]", raw_message):
+        SessionContext.set_language("hi")
+        tts.set_language("hi")
+
     app_ctx = get_active_app_context()
 
     # Step 1: Intent Pre-classification & Speech Mishearing Recovery
     raw_intent_check = classify_intent(raw_message)
     if raw_intent_check.intent in (
         IntentType.MULTISTEP_TASK,
+        IntentType.TAKE_PHOTO,
         IntentType.CONVERSATIONAL_AI,
         IntentType.WEBSITE_SEARCH,
         IntentType.BROWSER_SEARCH,
         IntentType.SYSTEM_SEARCH,
         IntentType.OPEN_WEBSITE,
         IntentType.DESCRIBE_SCREEN,
+        IntentType.CLICK_ELEMENT,
+        IntentType.MOUSE_CONTROL,
+        IntentType.LANGUAGE_SWITCH,
     ):
         interpreted = raw_message
     else:
         interpreted = await gemini_engine.interpret_intent(raw_message, app_ctx)
 
-    # Step 2: Capture screen context for vision-guided reasoning
-    cap = capture_screen_image()
-    ocr_blocks = perform_local_ocr_on_screen()
+    # Step 2: Lazy screen context accessors to avoid ~880ms overhead on every single command
+    _cached_cap = None
+    _cached_ocr = None
+
+    def _get_cap():
+        nonlocal _cached_cap
+        if _cached_cap is None:
+            _cached_cap = capture_screen_image()
+        return _cached_cap
+
+    def _get_ocr():
+        nonlocal _cached_ocr
+        if _cached_ocr is None:
+            _cached_ocr = perform_local_ocr_on_screen()
+        return _cached_ocr
 
     # Step 3: Check for sensitive operation (Guardrail)
     is_sensitive, confirm_prompt = gemini_engine.detect_sensitive_operation(interpreted)
@@ -337,42 +421,70 @@ async def post_chat(req: ChatRequest):
 
     # Step 4: Check if request is simply asking to describe or read screen
     lower_cmd = interpreted.lower()
+    current_lang = SessionContext.get_language()
     if any(q in lower_cmd for q in ["what is on my screen", "describe", "read this", "what's on my screen", "explain this window"]):
+        cap = _get_cap()
+        ocr_blocks = _get_ocr()
         desc = await gemini_engine.describe_screen(
             image_b64=cap.get("image_base64", ""),
             app_context=app_ctx,
             ocr_blocks=ocr_blocks,
             user_query=interpreted,
+            language=current_lang,
         )
-        tts.speak(desc)
+        tts.speak(desc, language=current_lang)
         store_session(interpreted, "complete", desc[:100])
         return {
             "requires_confirmation": False,
             "spoken_response": desc,
-            "action": {"command": "describe", "text": desc},
+            "action": {"command": "describe", "text": desc, "language": current_lang},
             "screen_image": cap.get("image_base64"),
         }
 
     # Step 4a: Check Intent Classification (Conversational AI vs Multistep Task vs Actions)
     intent_res = classify_intent(interpreted)
 
+    # Language Switch Handling (e.g. "Switch to Kannada", "Talk in Kannada")
+    if intent_res.intent == IntentType.LANGUAGE_SWITCH:
+        target_lang = intent_res.language or "kn"
+        SessionContext.set_language(target_lang)
+        tts.set_language(target_lang)
+        if SessionContext.is_kannada(target_lang):
+            ack_msg = "ಖಂಡಿತ, ಇನ್ನು ಮುಂದೆ ನಾನು ಕನ್ನಡದಲ್ಲಿ ಮಾತನಾಡುತ್ತೇನೆ."
+        else:
+            ack_msg = f"Language changed to {target_lang}."
+        tts.speak(ack_msg, language=target_lang)
+        store_session(interpreted, "complete", ack_msg)
+        return {
+            "requires_confirmation": False,
+            "spoken_response": ack_msg,
+            "action": {"command": "language_switch", "language": target_lang},
+            "intent": "language_switch",
+            "diagnostics": gemini_engine.get_diagnostics(),
+        }
+
     # Conversational AI (Q&A, explanations, learning plans, coding advice, error diagnostics)
     if intent_res.intent == IntentType.CONVERSATIONAL_AI:
         recent_history = get_recent_history(limit=4)
+        active_lang = SessionContext.get_language()
+        needs_vision = any(w in lower_cmd for w in ["screen", "window", "what does this say", "look at", "read this", "error on", "image"])
+        cap_b64 = _get_cap().get("image_base64", "") if needs_vision else ""
+        blocks = _get_ocr() if needs_vision else []
         ai_response = await gemini_engine.chat_conversational(
             user_query=interpreted,
             screen_context=app_ctx,
-            ocr_blocks=ocr_blocks,
-            image_b64=cap.get("image_base64", ""),
+            ocr_blocks=blocks,
+            image_b64=cap_b64,
             history=recent_history,
+            language=active_lang,
         )
-        tts.speak(ai_response)
+        tts.speak(ai_response, language=active_lang)
         store_session(interpreted, "complete", ai_response[:100])
         return {
             "requires_confirmation": False,
             "spoken_response": ai_response,
-            "action": {"command": "conversational_answer", "text": ai_response},
-            "screen_image": cap.get("image_base64"),
+            "action": {"command": "conversational_answer", "text": ai_response, "language": active_lang},
+            "screen_image": cap_b64 if cap_b64 else None,
             "intent": "conversational_ai",
             "diagnostics": gemini_engine.get_diagnostics(),
         }
@@ -386,7 +498,7 @@ async def post_chat(req: ChatRequest):
             "spoken_response": task_session.spoken_summary,
             "action": {"command": "multistep_workflow", "task_id": task_session.task_id},
             "task_session": task_session.model_dump(),
-            "screen_image": cap.get("image_base64"),
+            "screen_image": None,
             "intent": "multistep_task",
             "diagnostics": gemini_engine.get_diagnostics(),
         }
@@ -431,12 +543,39 @@ async def post_chat(req: ChatRequest):
             text=intent_res.target_app,
             done=True,
         )
+    elif intent_res.intent == IntentType.TAKE_PHOTO:
+        action = AgentAction(
+            command="take_photo",
+            explanation=intent_res.explanation or "Opening camera and capturing photo",
+            text=intent_res.target_app or "Photo Booth",
+            done=True,
+        )
+    elif intent_res.intent == IntentType.CLICK_ELEMENT:
+        action = AgentAction(
+            command="click_element",
+            explanation=intent_res.explanation or f"Clicking {intent_res.target_element or 'element'}",
+            target_element=intent_res.target_element,
+            click_type=intent_res.click_type,
+            button=intent_res.button,
+            x=intent_res.x,
+            y=intent_res.y,
+            done=True,
+        )
+    elif intent_res.intent == IntentType.MOUSE_CONTROL:
+        action = AgentAction(
+            command="mouse_control",
+            explanation=intent_res.explanation or f"Moving mouse cursor to {intent_res.target_element or 'target'}",
+            target_element=intent_res.target_element,
+            x=intent_res.x,
+            y=intent_res.y,
+            done=True,
+        )
     else:
         action: AgentAction = await gemini_engine.plan_action(
             user_text=interpreted,
-            image_b64=cap.get("image_base64", ""),
+            image_b64=_get_cap().get("image_base64", ""),
             app_context=app_ctx,
-            ocr_blocks=ocr_blocks,
+            ocr_blocks=_get_ocr(),
             step_number=1,
         )
 
@@ -480,6 +619,42 @@ async def post_chat(req: ChatRequest):
         exec_result = execute_open_application(app_name)
         spoken_feedback = exec_result.get("spoken_feedback", f"Opening {app_name}.")
 
+    elif cmd == "take_photo":
+        restore_prev = getattr(intent_res, "restore_previous", False)
+        exec_result = execute_take_photo(restore_previous=restore_prev)
+        spoken_feedback = exec_result.get("spoken_feedback", "Photo captured successfully.")
+
+    elif cmd == "file_search":
+        dir_target = getattr(action, "target_folder", None) or "Downloads"
+        exec_result = execute_find_latest_file(directory=dir_target)
+        spoken_feedback = exec_result.get("spoken_feedback", f"Found file in {dir_target}.")
+
+    elif cmd == "open_file":
+        target_path = getattr(action, "path", None) or action.text or ""
+        exec_result = execute_open_file(target_path)
+        spoken_feedback = exec_result.get("spoken_feedback", f"Opening file {target_path}.")
+
+    elif cmd == "create_folder":
+        folder_n = getattr(action, "folder_name", None) or action.text or "New Folder"
+        parent = getattr(action, "target_folder", None) or "Desktop"
+        exec_result = execute_create_folder(folder_n, parent_dir=parent)
+        spoken_feedback = exec_result.get("spoken_feedback", f"Created folder {folder_n}.")
+
+    elif cmd == "move_files":
+        target_f = getattr(action, "target_folder", None) or action.text or "Desktop"
+        paths = getattr(action, "source_paths", None) or []
+        exec_result = execute_move_files(paths, target_f)
+        spoken_feedback = exec_result.get("spoken_feedback", f"Moved files to {target_f}.")
+
+    elif cmd == "system_settings":
+        pane = action.text or getattr(action, "setting_type", None) or "Displays"
+        delta = getattr(action, "delta", None) or 0
+        exec_result = execute_system_settings(pane_query=pane, setting_type=getattr(action, "setting_type", None), delta=delta)
+        spoken_feedback = exec_result.get("spoken_feedback", f"Adjusted {pane} settings.")
+
+    elif cmd == "conversational_answer":
+        spoken_feedback = action.text or action.explanation or "Here is what I found."
+        exec_result = {"status": "success", "command": "conversational_answer", "text": spoken_feedback}
     elif cmd == "open_url" and action.url:
         exec_result = execute_open_url(action.url)
         spoken_feedback = f"Opening {action.url}."
@@ -487,22 +662,97 @@ async def post_chat(req: ChatRequest):
         exec_result = execute_type_spotlight(action.text)
         spoken_feedback = f"Opening {action.text}."
     elif cmd == "keyboard_type" and action.text:
-        exec_result = execute_keyboard_type(action.text)
-        spoken_feedback = f"Typed {action.text}."
+        lower_raw = interpreted.lower()
+        explicit_type = any(w in lower_raw for w in ["type", "enter text", "write down", "write text", "input text", "dictate"]) or bool(action.target_element)
+        if not explicit_type and not getattr(action, "target_app", None):
+            # Guard against typing user questions/instructions into active browser
+            active_lang = SessionContext.get_language()
+            ai_response = await gemini_engine.chat_conversational(
+                user_query=interpreted,
+                screen_context=app_ctx,
+                ocr_blocks=ocr_blocks,
+                image_b64=cap.get("image_base64", ""),
+                language=active_lang,
+            )
+            spoken_feedback = ai_response
+            exec_result = {"status": "success", "command": "conversational_answer", "text": ai_response}
+        else:
+            target_a = getattr(action, "target_app", None)
+            exec_result = execute_keyboard_type(action.text, target_app=target_a)
+            spoken_feedback = exec_result.get("spoken_feedback", f"Typed {action.text}.")
     elif cmd == "press_hotkey" and action.keys:
         exec_result = execute_hotkey(action.keys)
         spoken_feedback = f"Pressed {' plus '.join(action.keys)}."
     elif cmd == "scroll" and action.amount is not None:
         exec_result = execute_scroll(action.amount)
         spoken_feedback = "Scrolled."
-    elif cmd == "click" and action.x is not None and action.y is not None:
-        exec_result = execute_click(action.x, action.y)
-        spoken_feedback = f"Clicked at coordinate {action.x}, {action.y}."
+    elif cmd in ("click_element", "click_button"):
+        t_elem = getattr(action, "target_element", None) or action.text
+        c_type = getattr(action, "click_type", "single") or "single"
+        btn = getattr(action, "button", "left") or "left"
+        exec_result = execute_click_element(
+            target_element=t_elem,
+            click_type=c_type,
+            button=btn,
+            x=action.x,
+            y=action.y,
+            ocr_blocks=ocr_blocks,
+        )
+        spoken_feedback = exec_result.get("spoken_feedback", f"Clicked {t_elem or 'element'}.")
+
+    elif cmd in ("mouse_control", "move_mouse"):
+        target = getattr(action, "target_element", None) or action.text
+        exec_result = execute_mouse_move(
+            target=target,
+            x=action.x,
+            y=action.y,
+        )
+        spoken_feedback = exec_result.get("spoken_feedback", f"Moved mouse to {target or 'target'}.")
+
+    elif cmd == "double_click":
+        t_elem = getattr(action, "target_element", None) or action.text
+        exec_result = execute_double_click(
+            x=action.x,
+            y=action.y,
+            target_element=t_elem,
+            ocr_blocks=ocr_blocks,
+        )
+        spoken_feedback = exec_result.get("spoken_feedback", f"Double clicked {t_elem or 'element'}.")
+
+    elif cmd == "right_click":
+        t_elem = getattr(action, "target_element", None) or action.text
+        exec_result = execute_right_click(
+            x=action.x,
+            y=action.y,
+            target_element=t_elem,
+            ocr_blocks=ocr_blocks,
+        )
+        spoken_feedback = exec_result.get("spoken_feedback", f"Right clicked {t_elem or 'element'}.")
+
+    elif cmd == "click":
+        if getattr(action, "target_element", None):
+            exec_result = execute_click_element(
+                target_element=action.target_element,
+                click_type=getattr(action, "click_type", "single") or "single",
+                button=getattr(action, "button", "left") or "left",
+                x=action.x,
+                y=action.y,
+                ocr_blocks=ocr_blocks,
+            )
+            spoken_feedback = exec_result.get("spoken_feedback", f"Clicked {action.target_element}.")
+        elif action.x is not None and action.y is not None:
+            exec_result = execute_click(action.x, action.y)
+            spoken_feedback = f"Clicked at coordinate {action.x}, {action.y}."
+        else:
+            exec_result = execute_click_element(click_type="single")
+            spoken_feedback = "Clicked at current position."
+
     elif cmd == "describe" and action.text:
         spoken_feedback = action.text
 
     # Speak result aloud
-    tts.speak(spoken_feedback)
+    action_lang = getattr(action, "language", None) or SessionContext.get_language()
+    tts.speak(spoken_feedback, language=action_lang)
     store_session(interpreted, "complete", spoken_feedback)
 
     return {
@@ -510,7 +760,7 @@ async def post_chat(req: ChatRequest):
         "spoken_response": spoken_feedback,
         "action": action.model_dump(),
         "execution_result": exec_result,
-        "screen_image": cap.get("image_base64"),
+        "screen_image": _cached_cap.get("image_base64") if _cached_cap else None,
         "intent": intent_res.intent.value,
         "diagnostics": gemini_engine.get_diagnostics(),
     }
@@ -617,8 +867,56 @@ async def agent_websocket(websocket: WebSocket):
                                 execute_type_spotlight(action.text)
                             elif action.command == "scroll" and action.amount:
                                 execute_scroll(action.amount)
-                            elif action.command == "click" and action.x and action.y:
-                                execute_click(action.x, action.y)
+                            elif action.command in ("click_element", "click_button"):
+                                res = execute_click_element(
+                                    target_element=getattr(action, "target_element", None) or action.text,
+                                    click_type=getattr(action, "click_type", "single") or "single",
+                                    button=getattr(action, "button", "left") or "left",
+                                    x=action.x,
+                                    y=action.y,
+                                    ocr_blocks=ocr_blocks,
+                                )
+                                feedback = res.get("spoken_feedback", feedback)
+                            elif action.command in ("mouse_control", "move_mouse"):
+                                res = execute_mouse_move(
+                                    target=getattr(action, "target_element", None) or action.text,
+                                    x=action.x,
+                                    y=action.y,
+                                )
+                                feedback = res.get("spoken_feedback", feedback)
+                            elif action.command == "double_click":
+                                res = execute_double_click(
+                                    x=action.x,
+                                    y=action.y,
+                                    target_element=getattr(action, "target_element", None) or action.text,
+                                    ocr_blocks=ocr_blocks,
+                                )
+                                feedback = res.get("spoken_feedback", feedback)
+                            elif action.command == "right_click":
+                                res = execute_right_click(
+                                    x=action.x,
+                                    y=action.y,
+                                    target_element=getattr(action, "target_element", None) or action.text,
+                                    ocr_blocks=ocr_blocks,
+                                )
+                                feedback = res.get("spoken_feedback", feedback)
+                            elif action.command == "click":
+                                if getattr(action, "target_element", None):
+                                    res = execute_click_element(
+                                        target_element=action.target_element,
+                                        click_type=getattr(action, "click_type", "single") or "single",
+                                        button=getattr(action, "button", "left") or "left",
+                                        x=action.x,
+                                        y=action.y,
+                                        ocr_blocks=ocr_blocks,
+                                    )
+                                    feedback = res.get("spoken_feedback", feedback)
+                                elif action.x and action.y:
+                                    res = execute_click(action.x, action.y)
+                                    feedback = res.get("spoken_feedback", feedback)
+                                else:
+                                    res = execute_click_element(click_type="single")
+                                    feedback = res.get("spoken_feedback", feedback)
 
                             feedback = action.explanation or "Action completed."
                             tts.speak(feedback)

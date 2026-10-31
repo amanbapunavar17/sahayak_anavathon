@@ -124,13 +124,32 @@ def perform_local_ocr_on_screen() -> list[dict]:
                     text_str = candidates[0].string()
                     # Bounding box is in normalized coordinates (bottom-left origin in Vision)
                     bbox = item.boundingBox()
+                    bx = float(bbox.origin.x)
+                    bw = float(bbox.size.width)
+                    bh = float(bbox.size.height)
+                    by_bottom = float(bbox.origin.y)
+                    top_y = 1.0 - (by_bottom + bh)
+                    center_x = bx + (bw / 2.0)
+                    center_y = 1.0 - (by_bottom + (bh / 2.0))
+
+                    sw, sh = get_logical_screen_size()
+                    px = int(round(center_x * (sw - 1)))
+                    py = int(round(center_y * (sh - 1)))
+
                     text_blocks.append({
                         "text": text_str,
                         "confidence": float(candidates[0].confidence()),
-                        "x": float(bbox.origin.x),
-                        "y": float(1.0 - bbox.origin.y),  # flip to top-left origin
-                        "w": float(bbox.size.width),
-                        "h": float(bbox.size.height),
+                        "x": bx,
+                        "y": float(1.0 - bbox.origin.y),  # backward compatibility
+                        "top_y": top_y,
+                        "center_x": center_x,
+                        "center_y": center_y,
+                        "center_norm_x": int(round(center_x * 1000)),
+                        "center_norm_y": int(round(center_y * 1000)),
+                        "pixel_x": px,
+                        "pixel_y": py,
+                        "w": bw,
+                        "h": bh,
                     })
 
         if os.path.exists(temp_path):
@@ -287,4 +306,3 @@ def annotate_screenshot_ruler(image_b64: str, last_action: typing.Optional[dict]
     except Exception as exc:
         logger.error(f"annotate_screenshot_ruler error: {exc}")
         return image_b64
-

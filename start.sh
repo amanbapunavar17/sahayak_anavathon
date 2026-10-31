@@ -39,16 +39,25 @@ else
     echo -e "${GREEN}[✓] Gemini AI configuration detected.${RESET}\n"
 fi
 
-# 4. Announce via macOS Speech
+# 4. Check or Build native macOS Companion
+if [ ! -d "$SCRIPT_DIR/macos_companion/SahayakCompanion.app" ]; then
+    echo -e "${CYAN}[*] Building native macOS Companion (Option+Space global activation)...${RESET}"
+    bash "$SCRIPT_DIR/macos_companion/build_companion.sh" || true
+fi
+
+# 5. Announce via macOS Speech
 say -v Samantha "Starting SAHAYAK. Your Voice, Your Freedom." 2>/dev/null || true
 
-# 5. Open Dashboard in Browser after brief startup delay
+# 6. Launch macOS Companion & Web Dashboard after brief startup delay
 (
     sleep 2
+    if [ -d "$SCRIPT_DIR/macos_companion/SahayakCompanion.app" ]; then
+        open "$SCRIPT_DIR/macos_companion/SahayakCompanion.app" 2>/dev/null || true
+    fi
     open "http://127.0.0.1:8080" 2>/dev/null || true
 ) &
 
-# 6. Start the server
+# 7. Start the server
 echo -e "${GREEN}[✓] Starting SAHAYAK Server on http://127.0.0.1:8080...${RESET}"
 echo -e "    Press ${BOLD}Ctrl+C${RESET} to stop.\n"
 

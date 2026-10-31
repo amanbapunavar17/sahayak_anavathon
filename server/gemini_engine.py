@@ -1,3 +1,4 @@
+
 """
 SAHAYAK — Google Gemini Multi-Model Resilient AI Engine
 Tagline: Your Voice. Your Freedom.
@@ -24,12 +25,21 @@ import re
 import time
 import typing
 from datetime import datetime
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
+# Ensure environment variables are loaded immediately on import
+load_dotenv()
 
 try:
     from intent_classifier import classify_intent, IntentType, WEBSITE_CATALOG
 except ImportError:
     from server.intent_classifier import classify_intent, IntentType, WEBSITE_CATALOG
+
+try:
+    from session_context import SessionContext
+except ImportError:
+    from server.session_context import SessionContext
 
 logger = logging.getLogger("sahayak-gemini")
 
@@ -40,15 +50,16 @@ try:
     _HAS_GOOGLE_GENAI = True
 except ImportError:
     _HAS_GOOGLE_GENAI = False
+    types = None
     logger.warning("google-genai SDK not installed. Falling back to offline mode.")
 
 # Preferred primary model and automatic fallback hierarchy
-PRIMARY_MODEL_ID = "gemini-3.8-flash"
+PRIMARY_MODEL_ID = "gemini-3.5-flash"
 GEMINI_MODEL_ID = PRIMARY_MODEL_ID
 CANDIDATE_FLASH_MODELS = [
-    "gemini-3.8-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
     "gemini-flash-lite-latest",
     "gemini-3.1-flash-lite",
 ]
@@ -87,21 +98,34 @@ class SimpleAction(BaseModel):
 class AgentAction(BaseModel):
     explanation: str = "Action determined by SAHAYAK"
     command: typing.Literal[
-        "click", "type_text", "keyboard_type", "open_url",
+        "click", "click_element", "click_button", "mouse_control", "move_mouse",
+        "double_click", "right_click",
+        "type_text", "keyboard_type", "open_url",
         "press_hotkey", "scroll", "wait", "describe", "ask_confirmation",
         "website_search", "browser_search", "system_search", "open_website", "open_application",
-        "conversational_answer", "multistep_workflow"
+        "conversational_answer", "multistep_workflow", "take_photo",
+        "file_search", "open_file", "create_folder", "move_files", "system_settings"
     ]
     x: typing.Optional[int] = Field(default=None, ge=0, le=1000)
     y: typing.Optional[int] = Field(default=None, ge=0, le=1000)
     text: typing.Optional[str] = None
+    target_element: typing.Optional[str] = None
+    click_type: typing.Optional[str] = "single"
+    button: typing.Optional[str] = "left"
     url: typing.Optional[str] = None
     target_website: typing.Optional[str] = None
     query: typing.Optional[str] = None
     keys: typing.Optional[list[str]] = None
     amount: typing.Optional[int] = None
+    target_folder: typing.Optional[str] = None
+    folder_name: typing.Optional[str] = None
+    source_paths: typing.Optional[list[str]] = None
+    setting_type: typing.Optional[str] = None
+    delta: typing.Optional[int] = None
+    path: typing.Optional[str] = None
     is_sensitive: bool = False
     confirmation_prompt: typing.Optional[str] = None
+    language: typing.Optional[str] = None  # BCP-47 language code for output
     done: bool = False
 
 
@@ -113,6 +137,12 @@ class TaskStepPlan(BaseModel):
     query: typing.Optional[str] = None
     url: typing.Optional[str] = None
     text: typing.Optional[str] = None
+    target_folder: typing.Optional[str] = None
+    folder_name: typing.Optional[str] = None
+    source_paths: typing.Optional[list[str]] = None
+    setting_type: typing.Optional[str] = None
+    delta: typing.Optional[int] = None
+    path: typing.Optional[str] = None
     description: str
     expected_result: str
 
@@ -149,7 +179,10 @@ class GeminiEngine:
         self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
         if self.api_key and _HAS_GOOGLE_GENAI:
             try:
-                self.client = genai.Client(api_key=self.api_key)
+                self.client = genai.Client(
+                    api_key=self.api_key,
+                    http_options={"timeout": 30000},
+                )
                 self.connection_state = "online"
                 logger.info(f"GeminiEngine initialized. Candidates: {self.candidate_models}")
             except Exception as exc:
@@ -191,7 +224,7 @@ class GeminiEngine:
     def _call_with_failover(
         self,
         contents: typing.Any,
-        config: typing.Optional[types.GenerateContentConfig] = None,
+        config: typing.Any = None,
     ) -> str:
         """
         Executes content generation. If the current model hits quota (429) or is not found (404),
@@ -204,8 +237,8 @@ class GeminiEngine:
         t0 = time.time()
         self.connection_state = "reconnecting"
 
-        # Determine attempt sequence: start with current active model, then others
-        models_to_try = [self.active_model] + [m for m in self.candidate_models if m != self.active_model]
+        # Always prioritize primary_model (gemini-3.8-flash) on every request
+        models_to_try = [self.primary_model] + [m for m in self.candidate_models if m != self.primary_model]
         last_exception = None
 
         for model_name in models_to_try:
@@ -226,11 +259,12 @@ class GeminiEngine:
             except Exception as exc:
                 last_exception = exc
                 err_str = str(exc)
-                # Check for rate-limiting, quota exhaustion, or model not available
+                # Check for rate-limiting, quota exhaustion, timeouts, or model not available
                 is_quota_or_notfound = (
                     "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or
                     "404" in err_str or "NOT_FOUND" in err_str or
-                    "503" in err_str
+                    "503" in err_str or "504" in err_str or
+                    "DEADLINE_EXCEEDED" in err_str or "timed out" in err_str or "Timeout" in err_str
                 )
                 if is_quota_or_notfound:
                     logger.warning(f"Gemini model '{model_name}' hit limit/unavailable ({type(exc).__name__}). Trying next candidate...")
@@ -317,12 +351,19 @@ class GeminiEngine:
         ocr_blocks: typing.Optional[list[dict]] = None,
         image_b64: typing.Optional[str] = None,
         history: typing.Optional[list[dict]] = None,
+        language: typing.Optional[str] = None,
     ) -> str:
         """
         Provides direct, intelligent conversational answers to user questions,
         explanations, coding advice, learning plans, or screen error diagnostics.
         """
+        lang = language or SessionContext.get_language()
         if not self.is_available():
+            if SessionContext.is_kannada(lang):
+                return (
+                    f"ನಿಮ್ಮ ಪ್ರಶ್ನೆಯನ್ನು ನಾನು ಅರ್ಥಮಾಡಿಕೊಂಡಿದ್ದೇನೆ: '{user_query}'. "
+                    "ಆದರೆ ಪ್ರಸ್ತುತ ಜೆಮಿನಿ ಎಐ ಆಫ್‌ಲೈನ್‌ನಲ್ಲಿದೆ. ದಯವಿಟ್ಟು ಜೆಮಿನಿ API ಕೀಯನ್ನು ಕಾನ್ಫಿಗರ್ ಮಾಡಿ."
+                )
             return (
                 f"I understood your question: '{user_query}'. "
                 "However, Gemini AI is currently operating in offline mode. "
@@ -337,7 +378,8 @@ class GeminiEngine:
         lower_q = user_query.lower()
         is_screen_query = any(k in lower_q for k in ["screen", "error", "this window", "on display", "what does this mean", "failing"])
 
-        system_instruction = (
+        lang_instruction = SessionContext.get_language_prompt_instruction(lang)
+        base_instruction = (
             "You are SAHAYAK, an intelligent voice-controlled AI accessibility assistant on macOS for blind and sighted users alike. "
             "Provide an accurate, engaging, vivid, and conversational spoken response to the user's question or instruction. "
             "Keep the tone friendly, confident, and direct. "
@@ -345,6 +387,10 @@ class GeminiEngine:
             "CRITICAL FORMATTING RULE: Do not use markdown asterisks (*), hashtags (#), or bullet symbols (-) "
             "because your response is read directly aloud using native Text-to-Speech. Use natural conversational phrasing."
         )
+        if lang_instruction:
+            system_instruction = f"{lang_instruction}\n{base_instruction}"
+        else:
+            system_instruction = base_instruction
 
         prompt_parts = []
         if is_screen_query and (ocr_blocks or tab_title):
@@ -416,16 +462,28 @@ class GeminiEngine:
             f"USER INSTRUCTION: \"{user_instruction}\"\n"
             f"Current Front Application: {app_name}\n\n"
             f"Break this user instruction down into an ordered list of concrete, executable steps.\n"
+            f"CRITICAL: If the instruction contains multiple distinct actions (such as opening an application and adjusting a setting, or finding a file and opening it), you MUST output separate individual steps. Never combine opening an application and performing an action into a single step.\n\n"
             f"Allowed action_type values:\n"
             f"  - 'open_app': Launch or switch to an app (target_app)\n"
+            f"  - 'take_photo': Capture picture using Camera / Photo Booth (target_app: 'Photo Booth')\n"
+            f"  - 'restore_focus': Return application focus to previously active app (target_app)\n"
+            f"  - 'file_search': Search or locate files in Downloads, Documents, Desktop (query, target_folder)\n"
+            f"  - 'open_file': Open a local file path with default application (query)\n"
+            f"  - 'create_folder': Create a directory on Desktop or Downloads (folder_name, target_folder)\n"
+            f"  - 'move_files': Move files into destination folder (target_folder)\n"
+            f"  - 'system_settings': Adjust display brightness, sound volume, or open settings pane (setting_type, operation)\n"
+            f"  - 'open_website': Direct website navigation or visit (url, target_website)\n"
             f"  - 'website_search': Open website and search (target_website, query)\n"
             f"  - 'browser_search': General web search (query)\n"
-            f"  - 'system_search': Search local Mac files via Spotlight (query)\n"
+            f"  - 'system_search': Search local Mac files via Spotlight / mdfind (query)\n"
+            f"  - 'read_pdf': Extract text from local PDF document\n"
             f"  - 'read_page': Read and extract visible text from current browser page\n"
             f"  - 'summarize': Summarize extracted text using Gemini\n"
             f"  - 'create_note': Create a new note in Apple Notes (text, title)\n"
             f"  - 'speak': Announce spoken feedback to the user (text)\n"
             f"  - 'keyboard_type': Type text into active application (text)\n"
+            f"  - 'click_element': Click a button or UI element on screen (target_ui_element, click_type)\n"
+            f"  - 'mouse_control': Move mouse cursor to a location or landmark (target_ui_element, x, y)\n"
             f"  - 'press_hotkey': Press shortcut keys (keys)\n\n"
             f"Return ONLY valid JSON matching this schema:\n"
             f"{{\n"
@@ -456,6 +514,17 @@ class GeminiEngine:
             data = json.loads(raw_json)
             steps = data.get("steps", [])
             if steps:
+                for s in steps:
+                    act = s.get("action_type", "").lower()
+                    if act in ("open_application", "launch_app", "open_settings", "start_app", "open", "launch"):
+                        s["action_type"] = "open_app"
+                    elif s.get("target_app") and "open" in s.get("description", "").lower():
+                        s["action_type"] = "open_app"
+                if len(steps) < 2:
+                    local_steps = self._local_decompose_task(user_instruction)
+                    if len(local_steps) > len(steps):
+                        logger.info(f"Using local decomposition with {len(local_steps)} steps instead of single-step AI response.")
+                        return local_steps
                 logger.info(f"Decomposed '{user_instruction}' into {len(steps)} steps.")
                 return steps
         except Exception as exc:
@@ -466,11 +535,8 @@ class GeminiEngine:
     def _local_decompose_task(self, user_instruction: str) -> list[dict]:
         """Local heuristic multi-step splitter when Gemini is unreachable."""
         # Split on sequential conjunctions: "then", "and then", "after that", commas, and sequential 'and'
-        raw_parts = re.split(
-            r",\s*(?:and\s+)?then\s+|,?\s+then\s+|\s+after\s+that\s+|;\s*|,\s*and\s+|\s+and\s+(?=write|save|open|search|find|summarize|read|tell)",
-            user_instruction,
-            flags=re.IGNORECASE
-        )
+        pattern = r',?\s*(?:and\s+)?then\s+|\s+after\s+that\s+|;\s*|,\s*and\s+|,\s*(?=open|visit|search|find|read|write|save|return|switch|take|capture|create|make|move|change|set|adjust|click|press|tap|play|select|watch)|\s+and\s+(?=write|save|open|visit|search|find|summarize|read|tell|take|capture|return|switch|create|make|move|change|set|adjust|click|press|tap|double\s+click|right\s+click|play|select|watch)'
+        raw_parts = re.split(pattern, user_instruction, flags=re.IGNORECASE)
         steps = []
         step_id = 1
 
@@ -479,21 +545,152 @@ class GeminiEngine:
             if not part:
                 continue
 
-            lower_p = part.lower()
-            if "youtube" in lower_p and any(s in lower_p for s in ["search", "find"]):
-                m = re.search(r"search\s+(?:youtube\s+for|for)\s+(.+)", lower_p)
-                q = m.group(1) if m else "Python tutorials"
+            lower_p = part.lower().strip()
+
+            # 1. Return Focus / Application Switching Step
+            if any(w in lower_p for w in ["return to", "switch back to", "go back to"]):
+                m_ret = re.search(r"(?:return\s+to|switch\s+back\s+to|go\s+back\s+to)\s+(?:the\s+)?([a-zA-Z0-9\s]+)", lower_p)
+                ret_app = m_ret.group(1).strip().title() if m_ret else "Notes"
                 steps.append({
                     "step_id": step_id,
-                    "action_type": "website_search",
-                    "target_website": "youtube",
-                    "query": q,
-                    "description": f"Search YouTube for '{q}'",
-                    "expected_result": "Search results displayed on YouTube",
+                    "action_type": "restore_focus",
+                    "target_app": ret_app,
+                    "description": f"Return focus to {ret_app}",
+                    "expected_result": f"{ret_app} brought back to front",
                 })
-            elif any(w in lower_p for w in ["write down", "save to notes", "write to notes", "note down", "save note"]) or ("notes" in lower_p and any(w in lower_p for w in ["write", "save", "tasks"])):
-                m = re.search(r"(?:write\s+down|save\s+to\s+notes|save|write)\s+(.+)", lower_p)
-                note_text = m.group(1) if m else "SAHAYAK automated note"
+
+            # 2. System Settings & Brightness / Volume
+            elif any(w in lower_p for w in ["brightness", "display brightness", "volume", "sound volume", "system settings"]) or (
+                "settings" in lower_p and any(w in lower_p for w in ["change", "adjust", "set", "open"])
+            ):
+                if any(w in lower_p for w in ["brightness", "display"]):
+                    delta_val = -3 if any(w in lower_p for w in ["decrease", "lower", "dim", "down"]) else 3
+                    steps.append({
+                        "step_id": step_id,
+                        "action_type": "system_settings",
+                        "target_app": "System Settings",
+                        "setting_type": "displays",
+                        "operation": "brightness",
+                        "delta": delta_val,
+                        "description": "Change display brightness",
+                        "expected_result": "Display brightness adjusted and Displays settings verified",
+                    })
+                elif any(w in lower_p for w in ["volume", "sound", "mute", "unmute"]):
+                    steps.append({
+                        "step_id": step_id,
+                        "action_type": "system_settings",
+                        "target_app": "System Settings",
+                        "setting_type": "sound",
+                        "operation": "volume",
+                        "description": "Adjust sound volume",
+                        "expected_result": "Sound volume adjusted",
+                    })
+                elif any(w in lower_p for w in ["open", "launch"]):
+                    steps.append({
+                        "step_id": step_id,
+                        "action_type": "open_app",
+                        "target_app": "System Settings",
+                        "description": "Open System Settings",
+                        "expected_result": "System Settings is open and active",
+                    })
+                else:
+                    steps.append({
+                        "step_id": step_id,
+                        "action_type": "system_settings",
+                        "target_app": "System Settings",
+                        "setting_type": "general",
+                        "description": f"Adjust setting: {part}",
+                        "expected_result": "System Settings adjusted",
+                    })
+
+            # 3. Create Folder
+            elif any(w in lower_p for w in ["create a folder", "create folder", "make a folder", "make folder", "new folder"]):
+                m_fn = re.search(r"(?:folder\s+named|folder\s+called|create\s+(?:a\s+)?folder\s+)\s*([a-zA-Z0-9_\-\s]+)?", lower_p)
+                fn = m_fn.group(1).strip().title() if m_fn and m_fn.group(1) else "New Folder"
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "create_folder",
+                    "folder_name": fn,
+                    "target_folder": "Desktop",
+                    "description": f"Create folder '{fn}'",
+                    "expected_result": f"Folder '{fn}' created successfully",
+                })
+
+            # 4. Move Files
+            elif any(w in lower_p for w in ["move these files", "move files", "move it", "move them", "put these files", "put files"]):
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "move_files",
+                    "target_folder": "Desktop/New Folder",
+                    "description": "Move files into folder",
+                    "expected_result": "Files moved into target folder",
+                })
+
+            # 5. Open File ('open it', 'open file', 'open the file')
+            elif lower_p in ["open it", "open the file", "open this", "open them"] or (lower_p.startswith("open ") and any(w in lower_p for w in ["it", "the file", "this file", "that file"])):
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "open_file",
+                    "description": "Open located file with default application",
+                    "expected_result": "File opened in native viewer",
+                })
+
+            # 6. Find File (Downloads, Documents, latest file)
+            elif any(w in lower_p for w in ["find the latest file", "find latest file", "latest file in", "find file", "locate file"]) or ("file" in lower_p and any(w in lower_p for w in ["find", "locate", "latest", "downloads", "documents"])):
+                dir_target = "Downloads" if "downloads" in lower_p else ("Documents" if "documents" in lower_p else "Downloads")
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "file_search",
+                    "target_folder": dir_target,
+                    "query": "latest",
+                    "description": f"Find latest file in {dir_target}",
+                    "expected_result": f"Located latest file in {dir_target}",
+                })
+
+            # 7. Visit Website ('visit google', 'go to google', 'visit website')
+            elif lower_p.startswith("visit ") or ("visit" in lower_p and any(s in lower_p for s in ["google", "youtube", "github", "wikipedia"])):
+                m_site = re.search(r"visit\s+(?:the\s+)?([a-zA-Z0-9\-\.]+)", lower_p)
+                site = m_site.group(1).strip() if m_site else "Google"
+                url = f"https://www.{site}.com" if not site.startswith("http") and "." not in site else (f"https://{site}" if not site.startswith("http") else site)
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "open_website",
+                    "url": url,
+                    "target_website": site,
+                    "description": f"Visit {site.title()}",
+                    "expected_result": f"Navigated to {site.title()}",
+                })
+
+            # 8a. Video / Media Play Step ('play the second video', 'select the second video')
+            elif any(w in lower_p for w in ["play", "select", "watch"]) and any(w in lower_p for w in ["video", "second", "first", "third", "result", "song", "movie", "tutorial"]):
+                target_video = "second video" if any(w in lower_p for w in ["second", "2nd"]) else ("first video" if any(w in lower_p for w in ["first", "1st"]) else "second video")
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "click_element",
+                    "target_ui_element": target_video,
+                    "click_type": "single",
+                    "description": f"Click and play {target_video}",
+                    "expected_result": f"Playing {target_video}",
+                })
+
+            # 8b. C Program / Code Typing Step ('write a c program to write hello world program')
+            elif any(w in lower_p for w in ["c program", "hello world", "write code", "c code"]):
+                c_code = '#include <stdio.h>\n\nint main() {\n    printf("Hello, World!\\n");\n    return 0;\n}'
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "keyboard_type",
+                    "target_app": "TextEdit",
+                    "text": c_code,
+                    "description": "Write Hello World C program",
+                    "expected_result": "C program typed into document",
+                })
+
+            # 8. Note Taking / Writing
+            elif any(w in lower_p for w in ["write down", "save to notes", "write to notes", "note down"]) or (
+                any(w in lower_p for w in ["write", "save note"]) and not any(w in lower_p for w in ["open", "launch"])
+            ):
+                m = re.search(r"(?:write\s+down|save\s+to\s+notes|note\s+down|save\s+note|write)\s+(.+)", lower_p)
+                note_text = m.group(1).strip() if m else "SAHAYAK automated note"
                 steps.append({
                     "step_id": step_id,
                     "action_type": "create_note",
@@ -502,16 +699,110 @@ class GeminiEngine:
                     "description": f"Save note: '{note_text}'",
                     "expected_result": "Note created in Apple Notes",
                 })
+
+            # 8b. Button / Element Click Step
+            elif any(w in lower_p for w in ["click", "press", "tap", "double click", "right click"]):
+                c_type = "double" if "double click" in lower_p else ("right" if "right click" in lower_p else "single")
+                m_clk = re.search(r"(?:double\s+click|right\s+click|click|press|tap)(?:\s+on|\s+at)?(?:\s+the)?(?:\s+button)?(?:\s+named|\s+called)?\s*(.*?)$", lower_p)
+                raw_target = m_clk.group(1).strip() if m_clk else "button"
+                raw_target = re.sub(r"\s+(?:button|icon|tab|link|field|box)$", "", raw_target).strip(" .,;:-_!?()[]'\"`")
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "click_element",
+                    "target_ui_element": raw_target.title() if raw_target else None,
+                    "click_type": c_type,
+                    "description": f"Click button '{raw_target.title()}'",
+                    "expected_result": f"Button '{raw_target.title()}' clicked",
+                })
+
+            # 9. Camera / Photo Capture Step
+            elif any(w in lower_p for w in ["take a picture", "take a photo", "capture a picture", "capture a photo", "take picture", "take photo", "snap a photo"]) or ("camera" in lower_p and any(w in lower_p for w in ["take", "capture", "snap", "picture", "photo"])):
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "take_photo",
+                    "target_app": "Photo Booth",
+                    "description": "Capture picture using Camera",
+                    "expected_result": "Photo captured and saved",
+                })
+
+            # 10. Read PDF Content
+            elif ("pdf" in lower_p or "contents" in lower_p) and any(w in lower_p for w in ["read", "extract", "tell me"]):
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "read_pdf",
+                    "description": "Read contents of PDF",
+                    "expected_result": "PDF text extracted",
+                })
+
+            # 11. Search Local PDF File
+            elif "pdf" in lower_p and any(w in lower_p for w in ["find", "locate", "search"]):
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "system_search",
+                    "target_app": "Finder",
+                    "query": ".pdf",
+                    "description": "Find latest PDF file on Mac",
+                    "expected_result": "PDF file located",
+                })
+
+            # 12. Search Website (YouTube, Google, Wikipedia, GitHub, etc.)
+            elif any(s in lower_p for s in ["youtube", "google", "wikipedia", "github", "amazon"]) and any(s in lower_p for s in ["search", "find"]):
+                m_s = re.search(r"(?:search|find)\s+(?:on\s+)?(?:the\s+)?([a-zA-Z0-9]+)\s+for\s+(.+)", lower_p)
+                if m_s:
+                    st, q = m_s.group(1), m_s.group(2)
+                else:
+                    m_q = re.search(r"(?:search|find)\s+(?:for\s+)?(.+)", lower_p)
+                    q = m_q.group(1) if m_q else "Python tutorials"
+                    st = "youtube" if "youtube" in lower_p else "google"
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "website_search",
+                    "target_website": st,
+                    "query": q.strip(" .?!"),
+                    "description": f"Search {st.title()} for '{q.strip(' .?!')}'",
+                    "expected_result": f"Search results displayed on {st.title()}",
+                })
+
+            # 13. General Search (when inside a chain like 'and search for something')
+            elif any(w in lower_p for w in ["search for", "search"]) and not any(w in lower_p for w in ["open", "launch"]):
+                m_q = re.search(r"search\s+(?:for\s+)?(.+)", lower_p)
+                q = m_q.group(1).strip(" .?!") if m_q else "something"
+                steps.append({
+                    "step_id": step_id,
+                    "action_type": "website_search",
+                    "target_website": "google",
+                    "query": q,
+                    "description": f"Search for '{q}'",
+                    "expected_result": "Search results displayed",
+                })
+
+            # 14. Summarize Content (or Google News)
             elif "summarize" in lower_p:
+                if "news" in lower_p:
+                    steps.append({
+                        "step_id": step_id,
+                        "action_type": "open_website",
+                        "url": "https://news.google.com",
+                        "target_website": "google",
+                        "description": "Open Google News",
+                        "expected_result": "Google News loaded in browser",
+                    })
+                    step_id += 1
                 steps.append({
                     "step_id": step_id,
                     "action_type": "summarize",
-                    "description": "Summarize content",
-                    "expected_result": "Summary synthesized",
+                    "description": "Summarize today's top news headlines" if "news" in lower_p else "Summarize content",
+                    "expected_result": "Summary synthesized and spoken",
                 })
-            elif "open" in lower_p:
-                m_app = re.search(r"open\s+(?:the\s+)?([a-zA-Z0-9\s]+)", lower_p)
+
+            # 15. Open Application
+            elif "open" in lower_p or "launch" in lower_p:
+                m_app = re.search(r"(?:open|launch)\s+(?:the\s+)?([a-zA-Z0-9\s]+?)(?:\s+(?:and|then|to|with)\b|\.|\,|$|\n)", lower_p)
+                if not m_app:
+                    m_app = re.search(r"(?:open|launch)\s+(?:the\s+)?([a-zA-Z0-9\s]+)", lower_p)
                 app = m_app.group(1).strip() if m_app else "Safari"
+                if app.lower() in ["camera", "webcam"]:
+                    app = "Photo Booth"
                 steps.append({
                     "step_id": step_id,
                     "action_type": "open_app",
@@ -519,6 +810,8 @@ class GeminiEngine:
                     "description": f"Open {app.title()}",
                     "expected_result": f"{app.title()} brought to front",
                 })
+
+            # 16. Fallback Speak / Feedback
             else:
                 steps.append({
                     "step_id": step_id,
@@ -540,20 +833,23 @@ class GeminiEngine:
         app_context: dict,
         ocr_blocks: list[dict],
         user_query: str = "What is on my screen?",
+        language: typing.Optional[str] = None,
     ) -> str:
         """
         Provides a natural, vivid, structured spoken description of what is currently
         visible on the screen tailored for blind and low-vision individuals.
         """
+        lang = language or SessionContext.get_language()
         if not self.is_available():
-            return self._local_describe_screen(app_context, ocr_blocks, user_query)
+            return self._local_describe_screen(app_context, ocr_blocks, user_query, language=lang)
 
         app_name = app_context.get("app_name", "Unknown")
         tab_title = app_context.get("tab_title", "")
         tab_url = app_context.get("tab_url", "")
         ocr_summary = ", ".join([b.get("text", "") for b in ocr_blocks[:15]])
 
-        system_instruction = (
+        lang_instruction = SessionContext.get_language_prompt_instruction(lang)
+        base_instruction = (
             "You are SAHAYAK, a voice-first computer assistant for blind and low-vision individuals. "
             "You must describe the computer screen naturally, concisely, and informatively aloud. "
             "Prioritize: 1. Which application is currently in front. "
@@ -563,6 +859,10 @@ class GeminiEngine:
             "Keep the response natural, conversational, and direct for speech synthesis (2 to 4 sentences). "
             "Do not use markdown formatting, asterisks, bullet lists, or tables because this will be read aloud."
         )
+        if lang_instruction:
+            system_instruction = f"{lang_instruction}\n{base_instruction}"
+        else:
+            system_instruction = base_instruction
 
         prompt_text = (
             f"User asked: '{user_query}'\n"
@@ -589,13 +889,26 @@ class GeminiEngine:
             return desc
         except Exception as exc:
             logger.error(f"describe_screen Gemini error: {exc}")
-            return self._local_describe_screen(app_context, ocr_blocks, user_query)
+            return self._local_describe_screen(app_context, ocr_blocks, user_query, language=lang)
 
-    def _local_describe_screen(self, app_context: dict, ocr_blocks: list[dict], user_query: str) -> str:
+    def _local_describe_screen(
+        self,
+        app_context: dict,
+        ocr_blocks: list[dict],
+        user_query: str,
+        language: typing.Optional[str] = None,
+    ) -> str:
         """Local fallback when Gemini is unavailable."""
+        lang = language or SessionContext.get_language()
         app = app_context.get("app_name", "Finder")
         title = app_context.get("tab_title", "")
         texts = [b.get("text", "") for b in ocr_blocks[:10] if len(b.get("text", "")) > 3]
+
+        if SessionContext.is_kannada(lang):
+            if not texts:
+                return f"ನೀವು ಪ್ರಸ್ತುತ {app} ನಲ್ಲಿದ್ದೀರಿ. ಪರದೆಯ ಮೇಲೆ ಯಾವುದೇ ಪಠ್ಯ ಕಂಡುಬಂದಿಲ್ಲ."
+            summary_snippets = "; ".join(texts[:5])
+            return f"ನೀವು ಪ್ರಸ್ತುತ {app} ನಲ್ಲಿದ್ದೀರಿ. ಪತ್ತೆಯಾದ ಪಠ್ಯ: {summary_snippets}."
 
         if not texts:
             return f"You are currently in {app}. No readable text was detected on the front screen."
@@ -635,13 +948,26 @@ class GeminiEngine:
             return self._local_rule_action(user_text, app_context, ocr_blocks)
 
         app_name = app_context.get("app_name", "Finder")
+        visible_elements = [b.get("text") for b in ocr_blocks[:25] if b.get("text")]
+        ocr_summary = ", ".join([f"'{t}'" for t in visible_elements])
+        active_lang = SessionContext.get_language()
+        lang_instruction = SessionContext.get_language_prompt_instruction(active_lang)
+
         prompt = (
             f"You are the Autonomous Accessibility Agent for SAHAYAK on macOS.\n"
             f"TASK: '{user_text}'\n"
             f"Active Application: {app_name}\n"
+            f"Visible UI elements / buttons (OCR): [{ocr_summary}]\n"
             f"Step: {step_number}\n\n"
             f"Identify the user's intent and plan the single next action to advance the task.\n"
-            f"DISTINCT SEARCH & NAVIGATION COMMANDS (Choose the most specific):\n"
+            f"DISTINCT COMMANDS (Choose the most specific):\n"
+            f"  - conversational_answer: Direct conversational response, answer to a question, greeting, advice, explanation, or general knowledge.\n"
+            f"      Required: text (the complete natural spoken answer to the user).\n"
+            f"  - click_element: Click a visible button or UI element by name.\n"
+            f"      Required: target_element (e.g. 'Submit', 'Cancel', 'Settings', 'New Note').\n"
+            f"      Optional: click_type ('single', 'double', 'right').\n"
+            f"  - mouse_control: Move or glide the mouse cursor arrow to a landmark or target.\n"
+            f"      Optional: target_element (e.g. 'center', 'top right'), x, y.\n"
             f"  - website_search: Open a specific website (e.g. YouTube, Google, Wikipedia, GitHub, Amazon) and search within it.\n"
             f"      Required: target_website (e.g. 'youtube'), query (e.g. 'Python tutorials').\n"
             f"      CRITICAL: Never use type_text or Spotlight for website-specific searches!\n"
@@ -654,7 +980,8 @@ class GeminiEngine:
             f"  - open_application: Launch a local macOS application (e.g. Calculator, Notes).\n"
             f"      Required: text (e.g. 'Calculator').\n"
             f"  - click: x and y in [0, 1000] normalized space.\n"
-            f"  - keyboard_type: text to type into active input.\n"
+            f"  - keyboard_type: Text to type into an active text field or document.\n"
+            f"      CRITICAL RULE: ONLY use keyboard_type if the user EXPLICITLY ordered typing (e.g. 'type hello', 'write my note'). NEVER use keyboard_type for questions, general instructions, or conversational speech!\n"
             f"  - press_hotkey: list of keys like ['command', 'n'] or ['command', 'w'].\n"
             f"  - scroll: amount (e.g. -12 for down, 12 for up).\n"
             f"  - describe: explain screen content in text field.\n"
@@ -662,6 +989,8 @@ class GeminiEngine:
             f"Set done=true if task is finished.\n"
             f"Output JSON matching AgentAction schema."
         )
+        if lang_instruction:
+            prompt = f"{lang_instruction}\n\n{prompt}"
 
         try:
             contents = [prompt]
@@ -682,7 +1011,12 @@ class GeminiEngine:
                     data["command"] = data["action"]
                 if "explanation" not in data or not data["explanation"]:
                     data["explanation"] = f"Executing {data.get('command', 'action')}"
-            return AgentAction(**data)
+                if not data.get("language"):
+                    data["language"] = SessionContext.get_language()
+            action = AgentAction(**data)
+            if not action.language:
+                action.language = SessionContext.get_language()
+            return action
         except Exception as exc:
             logger.error(f"plan_action failed: {exc}")
             return self._local_rule_action(user_text, app_context, ocr_blocks)
@@ -740,6 +1074,28 @@ class GeminiEngine:
                 explanation=intent_res.explanation,
                 command="open_application",
                 text=intent_res.target_app,
+                done=True,
+            )
+
+        if intent_res.intent == IntentType.CLICK_ELEMENT:
+            return AgentAction(
+                explanation=intent_res.explanation or f"Clicking {intent_res.target_element or 'element'}",
+                command="click_element",
+                target_element=intent_res.target_element,
+                click_type=intent_res.click_type,
+                button=intent_res.button,
+                x=intent_res.x,
+                y=intent_res.y,
+                done=True,
+            )
+
+        if intent_res.intent == IntentType.MOUSE_CONTROL:
+            return AgentAction(
+                explanation=intent_res.explanation or f"Moving mouse cursor to {intent_res.target_element or 'target'}",
+                command="mouse_control",
+                target_element=intent_res.target_element,
+                x=intent_res.x,
+                y=intent_res.y,
                 done=True,
             )
 

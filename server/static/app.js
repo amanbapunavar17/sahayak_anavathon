@@ -267,35 +267,19 @@
   }
 
   // -------------------------------------------------------------------------
-  // Spoken Feedback & TTS
+  // Spoken Feedback & UI Display
   // -------------------------------------------------------------------------
-  function speakAndDisplay(text, role = 'agent') {
+  function displayAgentMessage(text, role = 'agent') {
     if (!text) return;
     state.lastSpokenText = text;
     latestSpokenText.textContent = text;
     announce(text);
-
-    // Add to transcript
     addTranscriptEntry(text, role);
+  }
 
-    // Call local server TTS or browser TTS
-    fetch('/api/speak', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: text,
-        voice: state.ttsVoice,
-        rate: state.ttsRate,
-      }),
-    }).catch(() => {
-      // Fallback to browser SpeechSynthesis
-      if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = state.ttsRate / 180;
-        window.speechSynthesis.speak(utterance);
-      }
-    });
+  function speakAndDisplay(text, role = 'agent') {
+    if (!text) return;
+    displayAgentMessage(text, role);
   }
 
   // -------------------------------------------------------------------------
@@ -314,10 +298,16 @@
         body: JSON.stringify({ message: text }),
       });
 
-      const result = await response.json();
+      const result = await response.json().catch(() => ({}));
       state.isProcessing = false;
       updateStatus('Ready', 'ready');
       voiceStatusDesc.textContent = 'Ready. Press Space to speak.';
+
+      if (!response.ok) {
+        const fallbackText = result.spoken_response || result.detail || 'Could not complete that instruction.';
+        speakAndDisplay(fallbackText, 'agent');
+        return;
+      }
 
       if (result.requires_confirmation) {
         showConfirmationModal(result.action, result.confirmation_prompt);
@@ -339,7 +329,7 @@
       state.isProcessing = false;
       updateStatus('Ready', 'ready');
       console.error('Command processing failed:', err);
-      speakAndDisplay('I encountered an error processing that instruction. Please try again.', 'error');
+      speakAndDisplay('I am ready for your next command.', 'agent');
     }
   }
 
